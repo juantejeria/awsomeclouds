@@ -14,6 +14,7 @@ export NUMEXPR_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export TOKENIZERS_PARALLELISM=false
 
-# Ejecutar Streamlit
-streamlit run streamlit_app.py
+# Ejecutar Streamlit (puedes sobreescribir con PORT=XXXX)
+PORT="${PORT:-8502}"
+streamlit run streamlit_app.py --server.port "$PORT"
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+from datetime import datetime
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -44,7 +45,45 @@ def create_establecimiento(nombre: str) -> Path:
     nombre_sanitizado = _sanitize_name(nombre)
     base = get_data_base_dir()
     estab_dir = ensure_dir(base / nombre_sanitizado / "cows")
+    write_json(
+        base / nombre_sanitizado / "meta.json",
+        {
+            "display_name": nombre.strip(),
+            "created_at": datetime.utcnow().isoformat(),
+        },
+    )
     return estab_dir.parent
+
+
+def get_establecimiento_display_name(establecimiento: str) -> str:
+    """Obtiene el nombre visible de un establecimiento."""
+    base = get_data_base_dir()
+    meta_path = base / establecimiento / "meta.json"
+    if meta_path.exists():
+        try:
+            meta = read_json(meta_path)
+            display_name = meta.get("display_name")
+            if isinstance(display_name, str) and display_name.strip():
+                return display_name.strip()
+        except Exception:
+            pass
+    return establecimiento.replace("_", " ")
+
+
+def update_establecimiento_display_name(establecimiento: str, display_name: str) -> None:
+    """Actualiza el nombre visible de un establecimiento."""
+    base = get_data_base_dir()
+    meta_path = base / establecimiento / "meta.json"
+    meta = {}
+    if meta_path.exists():
+        try:
+            meta = read_json(meta_path)
+        except Exception:
+            meta = {}
+    meta["display_name"] = display_name.strip()
+    meta.setdefault("created_at", datetime.utcnow().isoformat())
+    meta["updated_at"] = datetime.utcnow().isoformat()
+    write_json(meta_path, meta)
 
 
 def get_establecimiento_dir(nombre: str) -> Path:
@@ -71,12 +110,34 @@ def create_animal(establecimiento: str, nombre_animal: str) -> Path:
     nombre_sanitizado = _sanitize_name(nombre_animal)
     estab_dir = get_establecimiento_dir(establecimiento)
     animal_dir = ensure_dir(estab_dir / nombre_sanitizado)
+    write_json(
+        animal_dir / "meta.json",
+        {
+            "display_name": nombre_animal.strip(),
+            "created_at": datetime.utcnow().isoformat(),
+        },
+    )
     return animal_dir
 
 
 def get_animal_dir(establecimiento: str, animal: str) -> Path:
     """Retorna el directorio de un animal."""
     return get_establecimiento_dir(establecimiento) / animal
+
+
+def get_animal_display_name(establecimiento: str, animal: str) -> str:
+    """Obtiene el nombre visible de un animal."""
+    animal_dir = get_animal_dir(establecimiento, animal)
+    meta_path = animal_dir / "meta.json"
+    if meta_path.exists():
+        try:
+            meta = read_json(meta_path)
+            display_name = meta.get("display_name")
+            if isinstance(display_name, str) and display_name.strip():
+                return display_name.strip()
+        except Exception:
+            pass
+    return animal.replace("_", " ")
 
 
 def count_images_in_dir(dir_path: Path) -> int:

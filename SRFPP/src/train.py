@@ -24,6 +24,7 @@ from torchvision import datasets, transforms
 from tqdm import tqdm
 
 from .io_utils import ensure_dir, write_json
+from .dataset_manager import get_establecimiento_display_name
 from .model import build_model
 from .filtered_dataset import FilteredImageFolder
 
@@ -127,6 +128,8 @@ def main():
 
     dev = _device()
     artifacts_dir = ensure_dir(args.artifacts_dir)
+    estab_name = artifacts_dir.name
+    display_name_snapshot = get_establecimiento_display_name(estab_name)
 
     train_tfm = transforms.Compose(
         [
@@ -353,6 +356,7 @@ def main():
         "val_acc": float(va_acc),
         "best_val_acc": float(best_val_acc),
         "elapsed_time": float(elapsed),
+        "display_name": display_name_snapshot,
     })
 
     print(f"\nGuardado: {(artifacts_dir / 'model.pt').as_posix()}")

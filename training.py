@@ -1,12 +1,35 @@
+"""
+Entrenamiento de modelos de reconocimiento facial de ganado con transfer learning.
 
+Clases principales:
+  - CustomVGGModel: construye un modelo VGGFace (VGG16/ResNet50/SENet50) con capas
+    de clasificación personalizadas (512 → 256 → 128 → N clases)
+  - Generator: genera batches de entrenamiento/validación con data augmentation
+  - FitGenerator: entrena el modelo con EarlyStopping, ModelCheckpoint y TensorBoard
+  - ClassParser: guarda el mapeo clase→índice como labels.json
+
+Uso desde línea de comandos:
+  python training.py --granja "Mi Granja" --model resnet50 --epochs 30 --batch_size 16
+
+Dependencias: keras, keras_vggface (fork local), sklearn, numpy, PIL
+"""
 from keras_vggface.vggface import VGGFace
-from keras.engine import Model
+try:
+    from keras.engine import Model
+except ImportError:
+    from keras.models import Model
 from keras import models, layers
 from keras.models import Sequential
 from keras.layers import Flatten, Dense, Input
 from keras.applications.vgg16 import preprocess_input
-from keras.preprocessing.image import ImageDataGenerator
-from keras.optimizers import SGD
+try:
+    from keras.preprocessing.image import ImageDataGenerator
+except ImportError:
+    from keras.src.preprocessing.image import ImageDataGenerator
+try:
+    from keras.optimizers import SGD
+except ImportError:
+    from keras.optimizers.legacy import SGD
 from keras.callbacks import EarlyStopping, ModelCheckpoint, TensorBoard
 from sklearn.metrics import classification_report, confusion_matrix
 from datetime import datetime
@@ -35,43 +58,27 @@ class CustomVGGModel(object):
     def model_build(self):
 
         # Carga del modelo por defecto
-        """
+        # Usamos include_top=False para evitar descargar pesos pre-entrenados
+        # y construir las capas superiores manualmente
         self.vggface = VGGFace(include_top=False, 
                                  model=self.model, 
                                  input_shape=(
                                      self.height, 
                                      self.width, 
                                      self.channels
-                                     )
-                                )
-        """
-        self.vggface = VGGFace(include_top=True, 
-                                 model=self.model, 
-                                 input_shape=(
-                                     self.height, 
-                                     self.width, 
-                                     self.channels
-                                     )
+                                     ),
+                                 weights=None  # No descargar pesos, usar inicialización aleatoria
                                 )
         # Añadimos capas de clasificación a la red convolucional
-        """
         if self.model == 'vgg16':
             self.last_layer = self.vggface.get_layer('pool5').output
         elif self.model == 'resnet50':
             self.last_layer = self.vggface.get_layer('avg_pool').output
         elif self.model == 'senet50':
             self.last_layer = self.vggface.get_layer('avg_pool').output
-        """
-        if self.model == 'vgg16':
-            self.last_layer = self.vggface.get_layer('flatten').output
-        elif self.model == 'resnet50':
-            self.last_layer = self.vggface.get_layer('flatten_1').output
-        elif self.model == 'senet50':
-            self.last_layer = self.vggface.get_layer('flatten_1').output
-        """
+        
+        # Aplanar la salida de las capas convolucionales
         self.x = Flatten(name='flatten')(self.last_layer)
-        """
-        self.x = self.last_layer
         self.x = Dense(self.hidden_dim_1, activation='relu', name='fc1')(self.x)
         self.x = Dense(self.hidden_dim_2, activation='relu', name='fc2')(self.x)
         self.x = Dense(self.hidden_dim_3, activation='relu', name='fc3')(self.x)
@@ -125,6 +132,10 @@ class Generator(object):
         self.width = width
         self.batch_size = bs
         self.dir = dir # 'path-to-the-main-data-folder'
+        
+        # Para datasets pequeños, ajustamos validation_split dinámicamente
+        # Si hay muy pocas imágenes, usamos 0.0 para evitar problemas
+        self.validation_split = 0.0  # Desactivado para datasets pequeños
 
         self.generator=ImageDataGenerator(preprocessing_function=preprocess_input,
                             rotation_range=20,
@@ -132,7 +143,7 @@ class Generator(object):
                             height_shift_range=self.height*0.005,
                             # shear_range=0.01,
                             horizontal_flip=True,
-                            validation_split=0.2
+                            validation_split=self.validation_split
                             ) 
 
     def dataset_generator(self):
@@ -145,16 +156,21 @@ class Generator(object):
                                                 shuffle=True,
                                                 subset='training')
 
-        test_generator=self.generator.flow_from_directory(self.dir,
-                                                 target_size=(self.height,self.width),
-                                                 color_mode='rgb',
-                                                 batch_size=self.batch_size,
-                                                 class_mode='categorical',
-                                                 shuffle=True,
-                                                 subset='validation')
+        # Solo crear test_generator si validation_split > 0
+        if self.validation_split > 0:
+            test_generator=self.generator.flow_from_directory(self.dir,
+                                                     target_size=(self.height,self.width),
+                                                     color_mode='rgb',
+                                                     batch_size=self.batch_size,
+                                                     class_mode='categorical',
+                                                     shuffle=True,
+                                                     subset='validation')
+            step_size_test=test_generator.n//test_generator.batch_size if test_generator.n > 0 else 0
+        else:
+            test_generator = None
+            step_size_test = 0
 
-        step_size_train=train_generator.n//train_generator.batch_size
-        step_size_test=test_generator.n//test_generator.batch_size
+        step_size_train=train_generator.n//train_generator.batch_size if train_generator.n > 0 else 1
 
         return train_generator, test_generator, step_size_train, step_size_test
 
@@ -174,34 +190,60 @@ class FitGenerator(object):
         CheckpointsMkdir(farm).check()
         LogsMkdir().check()
     
-        early_stopping_callback = EarlyStopping(monitor='val_loss', 
-                                                patience=self.epochs_to_wait)
-        checkpoint_callback = ModelCheckpoint(filepath=os.path.join('./checkpoints', farm, 'chckpt.best.h5'), 
-                                              monitor='val_loss', 
-                                              verbose=1, 
-                                              save_best_only=True, 
-                                              mode='min')
+        # Usar fit() en lugar de fit_generator() (deprecado en Keras 2.x)
+        validation_data = self.test_generator if self.test_generator and self.step_size_test > 0 else None
+        validation_steps = self.step_size_test if self.step_size_test > 0 else None
+        
+        # Ajustar callbacks según si hay datos de validación
+        if validation_data is not None:
+            early_stopping_callback = EarlyStopping(monitor='val_loss', 
+                                                    patience=self.epochs_to_wait)
+            checkpoint_callback = ModelCheckpoint(filepath=os.path.join('./checkpoints', farm, 'chckpt.best.h5'), 
+                                                  monitor='val_loss', 
+                                                  verbose=1, 
+                                                  save_best_only=True, 
+                                                  mode='min')
+        else:
+            # Sin validación, usar 'loss' en lugar de 'val_loss' y guardar siempre
+            early_stopping_callback = EarlyStopping(monitor='loss', 
+                                                    patience=self.epochs_to_wait)
+            checkpoint_callback = ModelCheckpoint(filepath=os.path.join('./checkpoints', farm, 'chckpt.best.h5'), 
+                                                  monitor='loss', 
+                                                  verbose=1, 
+                                                  save_best_only=False,  # Guardar el último modelo
+                                                  save_weights_only=False,
+                                                  mode='min')
         
         tensorboard_callback = TensorBoard(log_dir='./logs/' + datetime.now().strftime("%Y%m%d-%H%M%S"),
                                           histogram_freq=0, # It is general issue with keras/tboard that you cannot get histograms with a validation_generator
                                           write_graph=True,
                                           write_images=True,
                                           )
-
-        self.model.fit_generator(generator=self.train_generator, \
-                               steps_per_epoch=self.step_size_train, \
-                               validation_data=self.test_generator, \
-                               validation_steps=self.step_size_test, \
-                               epochs=self.epochs, \
-                               verbose=1, \
-                               callbacks=[
-                                   early_stopping_callback, 
-                                   checkpoint_callback,
-                                   tensorboard_callback
-                                   ])
+        
+        self.model.fit(x=self.train_generator, \
+                       steps_per_epoch=self.step_size_train, \
+                       validation_data=validation_data, \
+                       validation_steps=validation_steps, \
+                       epochs=self.epochs, \
+                       verbose=1, \
+                       callbacks=[
+                           early_stopping_callback, 
+                           checkpoint_callback,
+                           tensorboard_callback
+                           ])
+        
+        # Guardar el modelo final si no se guardó antes
+        if not os.path.exists(os.path.join('./checkpoints', farm, 'chckpt.best.h5')):
+            self.model.save(os.path.join('./checkpoints', farm, 'chckpt.best.h5'))
+            print(f"✓ Modelo guardado en: ./checkpoints/{farm}/chckpt.best.h5")
     
     def confusion(self, farm):
-        class_pred = self.model.predict_generator(self.test_generator, self.step_size_test + 1)
+        # Usar predict() en lugar de predict_generator() (deprecado en Keras 2.x)
+        if self.test_generator and self.step_size_test > 0:
+            class_pred = self.model.predict(x=self.test_generator, steps=self.step_size_test + 1)
+        else:
+            print("⚠️  No hay datos de validación para generar matriz de confusión")
+            return
         class_pred = np.argmax(class_pred, axis=1)
         # Obtenemos los nombres de las etiquetas como una lista desde json
         with open(os.path.join('./checkpoints', farm, 'labels.json')) as json_file:
@@ -251,7 +293,7 @@ class ClassParser(object):
         self.dir = dir
     def save(self):
         CheckpointsMkdir(self.farm).check()
-        filepath = os.path.join(self.dir, self.farm) + '\\labels.json'
+        filepath = os.path.join(self.dir, self.farm, 'labels.json')
         with open(filepath, 'w') as fp:
             json.dump(self.input, 
                       fp, 

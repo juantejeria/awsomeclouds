@@ -1,16 +1,48 @@
+"""
+Visualización Grad-CAM para interpretar qué regiones de la imagen mira la red.
+
+Genera un mapa de calor superpuesto sobre la imagen original que muestra las zonas
+más relevantes para la predicción de la clase ganadora.
+
+Uso:
+  python grad_CAM.py --granja "Productor A" --img ruta/imagen.png --model resnet50
+
+Dependencias: tensorflow/keras, keras_vggface, tf-keras-vis (o keras-vis), matplotlib
+"""
 # https://fairyonice.github.io/Saliency-Map-with-keras-vis.html
 # https://fairyonice.github.io/Grad-CAM-with-keras-vis.html
 
-from keras import activations
-from keras.models import load_model
-import tensorflow as tf
+try:
+    import tensorflow as tf  # type: ignore[import]
+    from tensorflow.keras.models import load_model  # type: ignore[import]
+    from tensorflow.keras.preprocessing import image  # type: ignore[import]
+    KERAS_BACKEND = "tf.keras"
+except Exception:
+    # Fallback si no está disponible tensorflow.keras
+    from keras.models import load_model  # type: ignore[import]
+    from keras.preprocessing import image  # type: ignore[import]
+    KERAS_BACKEND = "keras"
 import matplotlib.pyplot as plt
 import numpy as np
 import os, json
-from keras.preprocessing import image
 from keras_vggface import utils
-from vis.visualization import visualize_cam
-from vis.utils import utils as vis_utils
+
+# Preferir tf-keras-vis si está instalado; si no, usar keras-vis (vis)
+try:
+    from tf_keras_vis.gradcam import Gradcam  # type: ignore[import]
+    from tf_keras_vis.utils import normalize  # type: ignore[import]
+    from tf_keras_vis.utils import utils as vis_utils  # type: ignore[import]
+    USE_TF_KERAS_VIS = True
+except Exception as _e:
+    try:
+        from vis.visualization import visualize_cam  # type: ignore[import]
+        from vis.utils import utils as vis_utils  # type: ignore[import]
+        USE_TF_KERAS_VIS = False
+    except Exception as _e2:
+        Gradcam = None
+        visualize_cam = None
+        vis_utils = None
+        _VIS_IMPORT_ERROR = _e2
 import argparse
 
 
@@ -69,6 +101,11 @@ class GradCAM(object):
         self.inv_classes = inv_classes
 
     def plot_map(self):
+        if vis_utils is None:
+            raise ImportError(
+                "Faltan dependencias para Grad-CAM. Instala `tf-keras-vis` (recomendado) "
+                "o `keras-vis` para continuar."
+            )
         # Utility to search for layer index by name. 
         # Alternatively we can specify this as -1 since it corresponds to the last layer.
         if self.arch == 'vgg16':
@@ -81,10 +118,16 @@ class GradCAM(object):
         class_idxs_sorted = np.argsort(self.scores.flatten())[::-1]
         class_idx  = class_idxs_sorted[0]
         seed_input = self.img
-        grad_top  = visualize_cam(self.model, layer_idx, class_idx, seed_input, 
-                                   penultimate_layer_idx = layer_idx,
-                                   backprop_modifier = None,
-                                   grad_modifier = None)
+
+        if USE_TF_KERAS_VIS:
+            gradcam = Gradcam(self.model, model_modifier=None, clone=True)
+            cam = gradcam(class_idx, seed_input, penultimate_layer=layer_idx)
+            grad_top = normalize(cam)[0]
+        else:
+            grad_top  = visualize_cam(self.model, layer_idx, class_idx, seed_input, 
+                                       penultimate_layer_idx = layer_idx,
+                                       backprop_modifier = None,
+                                       grad_modifier = None)
 
         fig, axes = plt.subplots(1, 2, figsize=(14,5))
         axes[0].imshow(self._img)

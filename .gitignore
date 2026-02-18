@@ -1,5 +1,50 @@
-dataset/*
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+*.egg
+dist/
+build/
+
+# ── Virtual environment ──
+venv/
+.venv/
+env/
+
+# ── YOLO models (shared separately, not versioned) ──
+models_yolo/*.pt
+yolov8*.pt
+
+# ── Dataset & media ──
+dataset/
+static/videos/
+static/img/
+graphs/
+support/
+
+# ── Debug / temp outputs ──
+*.log
+temp_frame_*.jpg
+*_debug*.png
+postes_debug_out.png
+resize_letterbox.png
+resize_old.png
+
+# ── Keras / TF model weights ──
 *.h5
+checkpoints/**/*.h5
+checkpoints/**/*.json
+
+# ── Misc ──
 *labels.json
-logs/*
-samples/*
+logs/
+samples/
+.DS_Store
+*.zip
+
+# ── IDE ──
+.vscode/
+.cursor/
+.idea/
+pyrightconfig.json

@@ -1,119 +1,260 @@
 {% extends "base.html" %} {% block content %}
 
-<div class="jumbotron jumbotron-fluid bg-dark">
-
-        <div class="jumbotron-background">
-            <img src="../static/img/cows-wallpaper.jpg" class="blur ">
-        </div>
-        
-        <div class="container text-white">
-        
-            <h1 class="display-4">Clasificador de ganado</h1>
-            <p class="lead">Identificando ganado haciendo uso de Deep Learning con redes convolucionales</p>
-            <hr class="my-4">
-
-            <p class="lead">Seleccione una imagen a identificar.</p>
-                    <form id="upload-file" method="post" enctype="multipart/form-data">
-                        <label for="imageUpload" class="upload-label">
-                           Browse...
-                            </label>
-                        <input type="file" name="file" id="imageUpload" accept=".png, .jpg, .jpeg">
-                        </form>
-
-                    <div class="image-section" style="display:none;">
-                        <div class="img-preview">
-                            <div id="imagePreview">
-
-                                </div>
-                            </div>
-
-                            <p class="lead">Pulse para predecir y visualizar scores.</p>
-                            <button type="button" class="btn btn-primary btn-lg " id="btn-predict">¡Predecir!</button>
-
-                        </div> 
+<!-- Header -->
+<header class="app-header">
+    <div class="container-fluid px-4">
+        <div class="d-flex justify-content-between align-items-center">
+            <div></div>
+            <div>
+                <a href="/" class="btn btn-header-home">
+                    <i class="fas fa-home"></i> Inicio
+                </a>
             </div>
-                
-            
-
-        
         </div>
-        <!-- /.container -->
-        
-        
-        </div>
-        <!-- /.jumbotron -->
-        <div class="container">
-                <div class="loader" style="display:none;">
-                        <div class="loader_ajax_small"></div>
-                    </div>
-            
-                <table id="resultTable" class="table table-hover text-center"></table>
-        
-                <p></p>
-        </div>
+    </div>
+</header>
 
-        <div class="container text-center">
-            <a href="/"><button type="button" class="btn btn-primary btn-lg " id="btn-new-farm" action="to_farm">Cambiar granja</button></a>
+<!-- Config bar -->
+<div class="config-bar">
+    <div class="container-fluid px-4">
+        <div class="row align-items-end">
+            <div class="col-auto mb-2">
+                <label for="breed" class="config-label">Raza</label>
+                <select class="config-select" id="breed">
+                    {% if breed_options is defined %}
+                    {% for val, label in breed_options %}
+                    <option value="{{ val }}"{% if val == 'desconocido' %} selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                    {% else %}
+                    <option value="desconocido" selected>Desconocido</option>
+                    <option value="angus">Angus</option>
+                    <option value="hereford">Hereford</option>
+                    <option value="shorthorn">Shorthorn</option>
+                    <option value="charolais">Charolais</option>
+                    <option value="limousin">Limousin</option>
+                    <option value="simmental">Simmental</option>
+                    <option value="brahman">Brahman</option>
+                    <option value="nelore">Nelore</option>
+                    <option value="gyr">Gyr</option>
+                    <option value="brangus">Brangus</option>
+                    <option value="bradford">Bradford / Braford</option>
+                    <option value="holando">Holando (Holstein)</option>
+                    <option value="generico">Generico</option>
+                    {% endif %}
+                </select>
+            </div>
+            <div class="col-auto mb-2">
+                <label for="category" class="config-label">Categoria</label>
+                <select class="config-select" id="category">
+                    {% if category_options is defined %}
+                    {% for val, label in category_options %}
+                    <option value="{{ val }}"{% if val == 'desconocido' %} selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                    {% else %}
+                    <option value="desconocido" selected>Desconocido</option>
+                    <option value="ternero">Ternero/a (cria)</option>
+                    <option value="recria">Recria (8-12 m)</option>
+                    <option value="vaquillona">Vaquillona</option>
+                    <option value="novillito">Novillito</option>
+                    <option value="novillo">Novillo</option>
+                    <option value="vaca">Vaca</option>
+                    <option value="toro">Toro</option>
+                    {% endif %}
+                </select>
+            </div>
+            <div class="col-auto mb-2">
+                <label for="age_range" class="config-label">Edad</label>
+                <select class="config-select" id="age_range">
+                    {% if age_options is defined %}
+                    {% for val, label in age_options %}
+                    <option value="{{ val }}"{% if val == 'desconocido' %} selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                    {% else %}
+                    <option value="desconocido" selected>Desconocido</option>
+                    <option value="0-6">0 - 6 meses</option>
+                    <option value="6-12">6 - 12 meses</option>
+                    <option value="12-18">12 - 18 meses</option>
+                    <option value="18-24">18 - 24 meses</option>
+                    <option value="24-36">24 - 36 meses</option>
+                    <option value="36+">36+ meses</option>
+                    {% endif %}
+                </select>
+            </div>
+            <div class="col-auto mb-2">
+                <label for="videoUpload" class="btn btn-upload mb-0">
+                    <i class="fas fa-video"></i> Subir Video
+                </label>
+                <input type="file" id="videoUpload" accept="video/*" style="display:none;">
+            </div>
+            <div class="col-auto mb-2" id="videoFileName" style="display:none;">
+                <small class="config-file-name" id="videoFileNameText"></small>
+            </div>
         </div>
-        
-        
-        <!-- 
-        For IE support of object-fit add this to your document
-        &lt;script src="https://cdnjs.cloudflare.com/ajax/libs/object-fit-images/3.2.4/ofi.min.js"&gt;&lt;/script&gt;
-        -->
+    </div>
+</div>
 
+<!-- Main content -->
+<div class="main-container">
+    <div class="container-fluid px-4 py-4">
 
-        <footer class="footer">
-                <div class="references container text-center">
-                    <p>La adecuación de las imágenes subidas es responsabilidad exclusiva de los usuarios.</p>
-                    <span class="text-muted">Copyright &copy; 2019, Telefónica CDO. All Rights Reserved.</span>
+        <!-- Placeholder when no video -->
+        <div id="noVideoPlaceholder">
+            <div class="placeholder-card mx-auto">
+                <div class="placeholder-icon">
+                    <i class="fas fa-video"></i>
                 </div>
-            </footer>
+                <h3 class="placeholder-title">Sube un video para comenzar</h3>
+                <p class="placeholder-text">Analiza frames de video para estimar el peso de ganado bovino usando vision artificial.</p>
 
-<style>
-.jumbotron {
-    position:relative;
-    overflow:hidden;
-    min-height: 1000px;
-}
+                <div class="steps-row">
+                    <div class="step-item">
+                        <div class="step-number">1</div>
+                        <div class="step-icon"><i class="fas fa-ruler-combined"></i></div>
+                        <div class="step-label">Calibrar</div>
+                        <div class="step-desc">Selecciona un frame con 2 postes para calibrar la escala</div>
+                    </div>
+                    <div class="step-item">
+                        <div class="step-number">2</div>
+                        <div class="step-icon"><i class="fas fa-crosshairs"></i></div>
+                        <div class="step-label">Keypoints</div>
+                        <div class="step-desc">Selecciona frames con keypoints visibles del animal</div>
+                    </div>
+                    <div class="step-item">
+                        <div class="step-number">3</div>
+                        <div class="step-icon"><i class="fas fa-calculator"></i></div>
+                        <div class="step-label">Calcular</div>
+                        <div class="step-desc">Calcula el peso estimado con la formula de Schaeffer</div>
+                    </div>
+                </div>
 
-.jumbotron .container {
-    position:relative;
-    z-index:2;
-    
-    background:rgba(0,0,0,0.2);
-    padding:2rem;
-    border:1px solid rgba(0,0,0,0.1);
-    border-radius:3px;
-}
+                <label for="videoUpload" class="btn btn-upload-lg">
+                    <i class="fas fa-cloud-upload-alt"></i> Seleccionar Video
+                </label>
+            </div>
+        </div>
 
-.jumbotron-background {
-    object-fit:cover;
-    font-family: 'object-fit: cover;';
-    position:absolute;
-    top:0;
-    z-index:1;
-    width:100%;
-    height:100%;
-    opacity:0.5;
-}
+        <!-- Video Player Card -->
+        <div id="videoCard" class="agro-card mb-3" style="display:none;">
+            <div class="agro-card-header header-dark">
+                <h5 class="mb-0"><i class="fas fa-film"></i> Video Player</h5>
+            </div>
+            <div class="agro-card-body p-0" style="background: #1a1a1a;">
+                <video id="videoPlayer" style="width:100%; max-height:65vh; display:block; margin:0 auto;"></video>
+            </div>
+            <div class="agro-card-footer">
+                <div class="d-flex align-items-center justify-content-between flex-wrap" style="gap: 8px;">
+                    <div class="d-flex align-items-center" style="gap: 4px;">
+                        <button class="btn btn-control" id="btnSkipBack" title="Retroceder 10 frames">
+                            <i class="fas fa-fast-backward"></i>
+                        </button>
+                        <button class="btn btn-control" id="btnPrev" title="Frame anterior">
+                            <i class="fas fa-step-backward"></i>
+                        </button>
+                        <button class="btn btn-control-play" id="btnPlayPause" title="Reproducir / Pausar">
+                            <i class="fas fa-play" id="playPauseIcon"></i>
+                        </button>
+                        <button class="btn btn-control" id="btnNext" title="Frame siguiente">
+                            <i class="fas fa-step-forward"></i>
+                        </button>
+                        <button class="btn btn-control" id="btnSkipForward" title="Avanzar 10 frames">
+                            <i class="fas fa-fast-forward"></i>
+                        </button>
+                    </div>
+                    <div class="text-center">
+                        <span class="frame-counter" id="frameCounter">
+                            Frame: 0 / 0
+                        </span>
+                        <input type="range" id="frameSlider" class="frame-slider" min="0" max="100" value="0">
+                    </div>
+                    <div>
+                        <button class="btn btn-analyze" id="btnAnalyze">
+                            <i class="fas fa-search"></i> Analizar Frame
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
 
-img.blur {
-    -webkit-filter: blur(2px);
-    filter: blur(2px);
-    filter:progid:DXImageTransform.Microsoft.Blur(PixelRadius='2');
+        <!-- Hidden canvas for frame capture -->
+        <canvas id="captureCanvas" style="display:none;"></canvas>
 
-}
+        <!-- Analysis Result Card -->
+        <div id="analysisCard" class="agro-card mb-3" style="display:none;">
+            <div class="agro-card-header header-accent">
+                <h5 class="mb-0"><i class="fas fa-microscope"></i> Resultado del Analisis - <span id="analysisFrameLabel">Frame ?</span></h5>
+            </div>
+            <div class="agro-card-body">
+                <!-- Loader -->
+                <div id="analysisLoader" class="text-center py-4" style="display:none;">
+                    <div class="spinner-border" style="color: var(--accent-warm);" role="status"></div>
+                    <p class="mt-2" style="color: var(--text-muted);">Analizando frame...</p>
+                </div>
+                <!-- Result -->
+                <div id="analysisContent" style="display:none;">
+                    <div class="text-center mb-3">
+                        <img id="annotatedImage" class="img-fluid rounded" style="max-width:100%; max-height:500px; border: 2px solid var(--border-subtle);">
+                    </div>
+                    <div id="analysisDetails" class="mb-3"></div>
+                    <div class="d-flex justify-content-center flex-wrap" style="gap: 10px;">
+                        <button class="btn btn-calibration" id="btnUseCalibration" disabled>
+                            <i class="fas fa-ruler-combined"></i> Usar como Calibracion (altura)
+                        </button>
+                        <button class="btn btn-keypoint" id="btnUseKeypoint" disabled>
+                            <i class="fas fa-crosshairs"></i> Usar como Frame de Keypoints
+                        </button>
+                    </div>
+                    <div class="mt-2 text-center">
+                        <small style="color: var(--text-muted);">
+                            <strong>Calibracion:</strong> necesita 2 postes + vaca visible |
+                            <strong>Keypoints:</strong> necesita vaca + keypoints (BL, Girth)
+                        </small>
+                    </div>
+                </div>
+            </div>
+        </div>
 
-form {
-    display: inline-block;
-}
+        <!-- Selected Frames Summary Card -->
+        <div id="selectionCard" class="agro-card mb-3" style="display:none;">
+            <div class="agro-card-header header-primary">
+                <h5 class="mb-0"><i class="fas fa-check-square"></i> Frames Seleccionados</h5>
+            </div>
+            <div class="agro-card-body">
+                <!-- Calibration -->
+                <div class="mb-3">
+                    <h6 class="section-label"><i class="fas fa-ruler-combined icon-calibration"></i> Calibracion (altura fija):</h6>
+                    <div id="calibrationSummary">
+                        <span style="color: var(--text-muted);">No seleccionado</span>
+                    </div>
+                </div>
+                <hr class="divider">
+                <!-- Keypoints -->
+                <div class="mb-3">
+                    <h6 class="section-label"><i class="fas fa-crosshairs icon-keypoint"></i> Frames de Keypoints:</h6>
+                    <div id="keypointsSummary">
+                        <span style="color: var(--text-muted);">Ninguno seleccionado</span>
+                    </div>
+                </div>
+                <hr class="divider">
+                <!-- Calculate button -->
+                <div class="text-center">
+                    <button class="btn btn-calculate" id="btnCalculateWeight" disabled>
+                        <i class="fas fa-calculator"></i> Calcular Peso
+                    </button>
+                </div>
+            </div>
+        </div>
 
-button, input, optgroup, select, textarea {
-    margin: 0;
-    margin-left: 20px;
-    font-family: inherit;
-}
-</style>
-    
+        <!-- Weight Results Card -->
+        <div id="resultsCard" class="agro-card mb-3" style="display:none;">
+            <div class="agro-card-header header-dark">
+                <h5 class="mb-0"><i class="fas fa-weight"></i> Resultados de Peso</h5>
+            </div>
+            <div class="agro-card-body">
+                <div id="resultsContent"></div>
+            </div>
+        </div>
+
+    </div>
+</div>
+
 {% endblock %}

@@ -1,3 +1,17 @@
+"""
+Carga de modelos de reconocimiento e inferencia sobre imágenes individuales.
+
+Clases principales:
+  - ModelLoad: carga un checkpoint Keras (.h5) desde disco
+  - ImageScore: preprocesa una imagen (224x224), ejecuta predicción y retorna
+    un diccionario con probabilidades por clase y metadatos (confianza, umbral,
+    flag is_unknown)
+
+Uso desde línea de comandos:
+  python testing.py --granja "Productor A" --img ruta/a/imagen.jpg
+
+Dependencias: keras, keras_vggface (fork local), numpy
+"""
 from keras.models import load_model
 from keras.preprocessing import image
 from keras_vggface import utils
@@ -23,11 +37,12 @@ class ModelLoad(object):
             print("Unable to open file name = %s, No such file or directory", self.filepath)
         
 class ImageScore(object):
-    def __init__(self, model, img, farm, version, **kwargs):
+    def __init__(self, model, img, farm, version, confidence_threshold=0.5, **kwargs):
         self.model = model
         self.img = img
         self.farm = farm
         self.version = version
+        self.confidence_threshold = confidence_threshold
 
     def scores(self):
         
@@ -50,9 +65,31 @@ class ImageScore(object):
         
         # Ordenamos de mayor a menor score
         preds = {k: preds[k] for k in sorted(preds, key=preds.get, reverse=True)}
-        preds = json.dumps(preds, indent=4, sort_keys=False)
-        #print(preds)
-        return preds
+        
+        # Detectar si es un animal desconocido (confianza baja)
+        max_confidence = max(preds.values())
+        predicted_class = list(preds.keys())[0]
+        
+        # Crear resultado con información adicional
+        result = {
+            'predictions': preds,
+            'metadata': {
+                'is_unknown': max_confidence < self.confidence_threshold,
+                'max_confidence': float(max_confidence),
+                'predicted_class': predicted_class,
+                'confidence_threshold': self.confidence_threshold
+            }
+        }
+        
+        # Si es desconocido, agregar mensaje de advertencia
+        if result['metadata']['is_unknown']:
+            result['metadata']['message'] = '⚠️ Animal Desconocido - No está en la base de datos'
+            result['metadata']['warning'] = f'La confianza máxima ({max_confidence*100:.2f}%) es menor al umbral ({self.confidence_threshold*100:.2f}%)'
+        else:
+            result['metadata']['message'] = '✓ Animal Reconocido'
+        
+        # Para uso en Flask, devolver diccionario completo
+        return result
 
 def main():
     parser = argparse.ArgumentParser(

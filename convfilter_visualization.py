@@ -1,4 +1,11 @@
+"""
+Visualización de filtros convolucionales mediante ascenso de gradiente.
 
+Genera imágenes que maximizan la activación de filtros individuales en una capa
+convolucional, mostrando qué patrones detecta cada filtro.
+
+Dependencias: keras, keras_vggface, numpy, PIL
+"""
 # https://keras.io/examples/conv_filter_visualization/
 from __future__ import print_function
 

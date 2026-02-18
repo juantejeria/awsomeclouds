@@ -1,3 +1,14 @@
+"""
+Limpieza de imágenes duplicadas en el dataset usando SSIM (Structural Similarity Index).
+
+Compara todas las imágenes de un directorio entre sí y elimina las que superan
+un umbral de similitud, conservando una copia de cada grupo de duplicados.
+
+Uso:
+  python ssim.py --dir dataset/animal_1 --threshold 0.95
+
+Dependencias: scikit-image, opencv-python, numpy
+"""
 from skimage import measure
 import matplotlib.pyplot as plt
 import numpy as np

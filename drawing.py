@@ -1,5 +1,15 @@
+"""
+Generación de grafos de arquitectura de red neuronal como imagen PNG.
+
+Uso:
+  python drawing.py --model resnet50
+
+Genera un archivo en graphs/<modelo>.png con la estructura de capas.
+
+Dependencias: keras, keras_vggface, graphviz (para plot_model)
+"""
 from keras.utils import plot_model
-from keras_vggface.vggface import VGGFace 
+from keras_vggface.vggface import VGGFace
 import argparse
 import os
 

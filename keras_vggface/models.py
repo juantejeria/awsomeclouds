@@ -10,16 +10,35 @@ from keras.layers import Flatten, Dense, Input, GlobalAveragePooling2D, \
     GlobalMaxPooling2D, Activation, Conv2D, MaxPooling2D, BatchNormalization, \
     AveragePooling2D, Reshape, Permute, multiply
 from keras_applications.imagenet_utils import _obtain_input_shape
-from keras.utils import layer_utils
-from keras.utils.data_utils import get_file
+try:
+    from keras.utils.data_utils import get_file
+except ImportError:
+    from keras.utils import get_file
 from keras import backend as K
 from keras_vggface import utils
-from keras.engine.topology import get_source_inputs
 import warnings
 from keras.models import Model
 from keras import layers
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
+# Compatibilidad con Keras 2.x
+try:
+    from keras.utils import layer_utils
+except ImportError:
+    # En Keras 2.x, estas funciones pueden no ser necesarias
+    layer_utils = None
+
+try:
+    from keras.engine.topology import get_source_inputs
+except ImportError:
+    # En Keras 2.x, get_source_inputs está en otra ubicación o no es necesario
+    try:
+        from keras.utils.layer_utils import get_source_inputs
+    except ImportError:
+        # Si no existe, usamos una función alternativa
+        def get_source_inputs(tensor):
+            return [tensor]
 
 def VGG16(include_top=True, weights='vggface',
           input_tensor=None, input_shape=None,
@@ -113,10 +132,10 @@ def VGG16(include_top=True, weights='vggface',
                                     utils.VGG16_WEIGHTS_PATH_NO_TOP,
                                     cache_subdir=utils.VGGFACE_DIR)
         model.load_weights(weights_path, by_name=True)
-        if K.backend() == 'theano':
+        if layer_utils and K.backend() == 'theano':
             layer_utils.convert_all_kernels_in_model(model)
 
-        if K.image_data_format() == 'channels_first':
+        if layer_utils and K.image_data_format() == 'channels_first':
             if include_top:
                 maxpool = model.get_layer(name='pool5')
                 shape = maxpool.output_shape[1:]
@@ -283,7 +302,7 @@ def RESNET50(include_top=True, weights='vggface',
                                     utils.RESNET50_WEIGHTS_PATH_NO_TOP,
                                     cache_subdir=utils.VGGFACE_DIR)
         model.load_weights(weights_path)
-        if K.backend() == 'theano':
+        if layer_utils and K.backend() == 'theano':
             layer_utils.convert_all_kernels_in_model(model)
             if include_top:
                 maxpool = model.get_layer(name='avg_pool')
@@ -484,7 +503,7 @@ def SENET50(include_top=True, weights='vggface',
                                     utils.SENET50_WEIGHTS_PATH_NO_TOP,
                                     cache_subdir=utils.VGGFACE_DIR)
         model.load_weights(weights_path)
-        if K.backend() == 'theano':
+        if layer_utils and K.backend() == 'theano':
             layer_utils.convert_all_kernels_in_model(model)
             if include_top:
                 maxpool = model.get_layer(name='avg_pool')

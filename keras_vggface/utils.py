@@ -5,7 +5,10 @@
 
 import numpy as np
 from keras import backend as K
-from keras.utils.data_utils import get_file
+try:
+    from keras.utils.data_utils import get_file
+except ImportError:
+    from keras.utils import get_file
 import io
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'

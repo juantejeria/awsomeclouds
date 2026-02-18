@@ -1,162 +1,346 @@
-# Cattle Recognition - Identificación de Ganado con Convolutional Neural Networks (CNNs)
+# cattle-recognition
 
-<p align="center">
-<img width="500" height="300" src=./support/cow_meme.jpg>
-</p>
-Este proyecto tiene como misión hacer uso de redes convolucionales para la identificación de ganado (vacas, cerdos, etc.) haciendo uso de redes neuronales profundas convolucionales. Las capas convolucionales actúan como extractores de características.
+Sistema de **reconocimiento individual de ganado** y **estimación de peso en vivo** mediante Deep Learning, modelos YOLO y visión por computadora.
 
-Con la intención de ahorrar tiempo, se pretende hacer uso de modelos ya entrenados de Deep Learning dedicados a reconocimiento facial de seres humanos para la identificación de ganado. *(Pendiente de probar).*
+## Arquitectura General
 
-Para ello, se realiza Transfer Learning y Fine-Tuning de los modelos de Oxford VGGFace a través del endopoint de TensorFlow. El código de este repositorio soporta tanto los modelos **VGG16** como **RESNET50** o **SENET50**:
+```
+                         ┌──────────────────────────────────────────┐
+                         │            Flask Web App (app.py)        │
+                         │   http://localhost:5001                  │
+                         └────────┬───────────┬───────────┬────────┘
+                                  │           │           │
+                    ┌─────────────┘     ┌─────┘     ┌─────┘
+                    ▼                   ▼           ▼
+            ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐
+            │  /predict     │  │/predict_video│  │/detect_reference │
+            │  (imagen)     │  │  (video)     │  │  _points         │
+            └──────┬───────┘  └──────┬───────┘  └──────┬───────────┘
+                   │                 │                  │
+          ┌────────┴────────┐  ┌─────┴──────┐    ┌─────┴──────┐
+          ▼                 ▼  ▼            ▼    ▼            │
+  ┌──────────────┐ ┌────────────┐ ┌──────────────┐ ┌──────────────┐
+  │  testing.py  │ │weight_est. │ │video_proc.py │ │depth_est.py  │
+  │  (CNN face)  │ │   .py      │ │  (tracking)  │ │  (postes)    │
+  └──────┬───────┘ └──────┬─────┘ └──────┬───────┘ └──────────────┘
+         │                │              │
+         ▼                ▼              ▼
+  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+  │ keras_vggface│ │ YOLO models  │ │ breed_coeff. │
+  │ (VGG/ResNet/ │ │ cow.pt       │ │   .py        │
+  │  SENet)      │ │ eye.pt       │ │ (K_breed *   │
+  │              │ │ sticker.pt   │ │  K_cat *     │
+  └──────────────┘ └──────────────┘ │  K_age)      │
+                                    └──────────────┘
+```
+
+## Requisitos
+
+- **Python 3.9** (probado con CPython 3.9.x en macOS)
+- TensorFlow / Keras (para reconocimiento facial de ganado)
+- Ultralytics YOLO (para detección de cuerpo, ojos y postes)
+- OpenCV, NumPy, scikit-learn, Pillow, Flask
+
+### Instalación
+
+```bash
+# Clonar el repositorio
+git clone <url-del-repo> cattle-recognition
+cd cattle-recognition
+
+# Crear entorno virtual
+python3.9 -m venv venv
+source venv/bin/activate
+
+# Instalar dependencias
+pip install -r requirements.txt   # si existe
+# o manualmente:
+pip install flask tensorflow ultralytics opencv-python-headless \
+            numpy scikit-learn scikit-image pillow
+```
+
+## Configuración
+
+### `config.ini`
+
+```ini
+[app]
+app-secret-key=<clave-secreta-para-flask>
+
+[detection]
+confidence_threshold=0.5   # Umbral para considerar un animal "conocido"
+```
+
+### Modelos YOLO
+
+Deben existir en `models_yolo/`:
+
+| Archivo       | Función                              |
+|---------------|--------------------------------------|
+| `cow.pt`      | Detección de cuerpo + keypoints      |
+| `eye.pt`      | Segmentación de ojos (instancias)    |
+| `sticker.pt`  | Detección de postes/stickers rojos   |
+
+### Checkpoints de reconocimiento
+
+Cada granja necesita una carpeta en `checkpoints/`:
+
+```
+checkpoints/
+  Productor A/
+    chckpt.best.h5   # Modelo Keras entrenado
+    labels.json       # {"animal_1": 0, "animal_2": 1, ...}
+```
+
+## Ejecución
+
+```bash
+# Opción 1: Script de arranque
+./run_app.sh
+
+# Opción 2: Directamente
+source venv/bin/activate
+python app.py
+```
+
+El servidor arranca en **http://localhost:5001**.
+
+## Estructura del Proyecto
+
+```
+cattle-recognition/
+├── app.py                      # Servidor Flask: endpoints de la API
+├── weight_estimation.py        # Estimación de peso (Schaeffer adaptada)
+├── depth_estimation.py         # Detección de postes y escala cm/px
+├── video_processor.py          # Procesamiento de video con tracking IoU
+├── testing.py                  # Carga de modelo e inferencia CNN
+├── training.py                 # Entrenamiento de modelos VGGFace
+├── breed_coefficients.py       # Multiplicadores por raza/categoría/edad
+│
+├── config.ini                  # Configuración de la app
+├── run_app.sh                  # Script de arranque
+│
+├── models_yolo/                # Modelos YOLO pre-entrenados
+│   ├── cow.pt                  #   Detección de cuerpo + 9 keypoints
+│   ├── eye.pt                  #   Segmentación de ojos
+│   └── sticker.pt              #   Detección de postes rojos
+│
+├── keras_vggface/              # Fork local de keras-vggface (TF2)
+│   ├── __init__.py
+│   ├── vggface.py              #   Punto de entrada VGGFace()
+│   ├── models.py               #   Definición de VGG16/ResNet50/SENet50
+│   ├── utils.py                #   Preprocesamiento de imágenes
+│   └── version.py
+│
+├── checkpoints/                # Modelos entrenados por granja
+│   └── Productor A/
+│       ├── chckpt.best.h5
+│       └── labels.json
+│
+├── dataset/                    # Imágenes de entrenamiento
+│   ├── animal_1/               #   ~10-20 imágenes recortadas de la cara
+│   ├── animal_2/
+│   └── ...
+│
+├── templates/                  # Templates HTML (Jinja2)
+│   ├── base.html               #   Template base (Bootstrap 4)
+│   ├── chooser.html            #   Selector de granja
+│   └── index.html              #   Interfaz principal
+│
+├── static/
+│   ├── css/main.css            # Estilos
+│   ├── js/engine.js            # Lógica del frontend
+│   └── img/                    # Imágenes estáticas
+│
+├── diagnose_model.py           # Diagnóstico de precisión del modelo CNN
+├── diagnose_weight.py          # Diagnóstico de logs de estimación de peso
+├── grad_CAM.py                 # Visualización Grad-CAM
+├── ssim.py                     # Limpieza de duplicados por SSIM
+├── organize_dataset.py         # Organización de imágenes en clases
+├── drawing.py                  # Grafos de arquitectura de red
+└── convfilter_visualization.py # Visualización de filtros convolucionales
+```
+
+## Flujo de Datos
+
+### Imagen: `/predict` (POST)
+
+```
+Imagen (JPG/PNG)
+    │
+    ├─► YOLO cow.pt  ──► bbox del animal + 9 keypoints
+    │                         │
+    │                         ├─► KP1 (pinbone) ─────┐
+    │                         ├─► KP2 (shoulderbone) ─┤─► dist1 (Body Length)
+    │                         ├─► KP3 (girth bottom) ─┤
+    │                         └─► KP4 (girth top) ────┘─► dist2 (Girth Vertical)
+    │
+    ├─► YOLO eye.pt  ──► segmentación de ojos ──► dist_ojos (px)
+    │                                                │
+    │                                                └─► escala: 20cm / dist_ojos_px
+    │
+    ├─► YOLO sticker.pt ──► postes rojos ──► altura_px
+    │                                            │
+    │                                            └─► escala: 122cm / altura_px
+    │
+    ├─► CNN VGGFace (ResNet50) ──► reconocimiento: {animal_N: probabilidad}
+    │
+    └─► Fórmula de peso ──► peso_kg
+```
+
+### Video: `/predict_video` (POST)
+
+```
+Video (MP4/AVI/MOV)
+    │
+    └─► VideoProcessor.process_video_simple()
+            │
+            ├─► Frame N ──► YOLO cow.pt ──► bboxes
+            │                   │
+            │                   └─► Tracking IoU ──► cow_0, cow_1, ...
+            │                         │
+            │                         ├─► ROI expandido ──► CNN reconocimiento
+            │                         │
+            │                         └─► Frame completo ──► estimate_weight()
+            │                               │
+            │                               ├─► Calibración de altura (cm_per_px)
+            │                               └─► Fallback: cow-height como "regla"
+            │
+            └─► Agregación por track_id
+                    ├─► Votación ponderada (identidad)
+                    ├─► Media/mediana de pesos
+                    └─► Frames con peso (galería)
+```
+
+## Fórmula de Peso (Schaeffer Adaptada)
+
+La estimación de peso se basa en la fórmula de Schaeffer modificada:
+
+### Fórmula original de Schaeffer
+
+```
+Weight_lbs = (HG² × BL) / 300
+```
+
+Donde:
+- **HG** = Heart Girth (circunferencia completa detrás de las patas delanteras)
+- **BL** = Body Length (largo del cuerpo: hombro a cadera)
+
+### Adaptación en este sistema
+
+En nuestro caso, no medimos la circunferencia completa sino el **diámetro vertical** de la zona del girth:
+
+```
+raw_weight_kg = (BL × GirthVert² × lb) / 406
+```
+
+Donde:
+- **BL** = `dist1cm` = distancia KP1 (pinbone) → KP2 (shoulderbone) en cm
+- **GirthVert** = `dist2cm` = distancia KP3 (girth bottom) → KP4 (girth top) en cm
+- **lb** = 0.45359237 (conversión libras → kg)
+- **406** = divisor calibrado (calibrado con animal conocido de 446 kg)
+
+### Conversión de píxeles a centímetros
+
+La escala `cm/px` se obtiene de una referencia de tamaño conocido:
+
+| Método      | Referencia                                     | Cálculo                            |
+|-------------|------------------------------------------------|------------------------------------|
+| **Ojos**    | Distancia inter-ocular del ganado (~20 cm)     | `cm_per_px = 20 / dist_ojos_px`   |
+| **Poste**   | Franja roja del poste (122 cm de altura)       | `cm_per_px = 122 / altura_px`     |
+
+### Corrección por raza, categoría y edad
+
+El peso final se ajusta con multiplicadores (`breed_coefficients.py`):
+
+```
+peso_final = raw_weight × K_breed × K_category × K_age
+```
+
+Ejemplo: Brahman × Ternero × 0-6 meses = `0.93 × 0.84 × 0.85 = 0.664`
+
+## Endpoints de la API
+
+| Método | Ruta                     | Descripción                                           |
+|--------|--------------------------|-------------------------------------------------------|
+| GET    | `/`                      | Página principal: selector de granja                  |
+| POST   | `/load_model`            | Carga el modelo CNN de la granja seleccionada         |
+| POST   | `/predict`               | Procesa una imagen (reconocimiento + peso)            |
+| POST   | `/predict_video`         | Procesa un video completo con tracking multi-vaca     |
+| POST   | `/detect_reference_points` | Detecta postes rojos y muestra mediciones           |
+| POST   | `/detect_posts_all`      | Detecta todos los postes del alambrado (experimental) |
+
+### Parámetros de `/predict` y `/predict_video`
+
+| Parámetro            | Tipo    | Default        | Descripción                                    |
+|----------------------|---------|----------------|-------------------------------------------------|
+| `file`               | File    | (requerido)    | Imagen o video a procesar                       |
+| `enable_recognition` | string  | `"true"`       | Activar reconocimiento facial                   |
+| `enable_weight`      | string  | `"true"`       | Activar estimación de peso                      |
+| `scale_method`       | string  | `"both"`       | `"both"`, `"eyes"`, `"poste"`                   |
+| `breed`              | string  | `"desconocido"`| Raza del animal (para corrección de peso)       |
+| `category`           | string  | `"desconocido"`| Categoría (ternero, novillo, vaca, toro, etc.)  |
+| `age_range`          | string  | `"desconocido"`| Rango de edad (`"0-6"`, `"6-12"`, ..., `"36+"`) |
+| `sample_rate`        | int     | `1`            | (video) Procesar 1 frame cada N frames          |
+| `debug`              | string  | `"false"`      | (video) Logs detallados en consola              |
+
+## Entrenamiento de un modelo nuevo
+
+```bash
+# 1. Preparar dataset: imágenes recortadas de la cara en dataset/animal_N/
+# 2. Entrenar (por defecto usa ResNet50, 20 epochs):
+python training.py --granja "Mi Granja" --model resnet50 --epochs 30 --batch_size 16
+
+# 3. El checkpoint se guarda en checkpoints/Mi Granja/chckpt.best.h5
+#    El mapeo de clases se guarda en checkpoints/Mi Granja/labels.json
+```
+
+## Herramientas de Diagnóstico
+
+```bash
+# Verificar precisión del modelo CNN con el dataset
+python diagnose_model.py "Productor A"
+
+# Analizar logs de peso para entender qué puntos faltan
+python diagnose_weight.py app.log
+
+# Visualizar Grad-CAM (qué mira la red)
+python grad_CAM.py --granja "Productor A" --img dataset/animal_1/foto.png --model resnet50
+
+# Limpiar imágenes duplicadas del dataset por similitud SSIM
+python ssim.py --dir dataset/animal_1 --threshold 0.95
+```
+
+## Troubleshooting
+
+### El peso no se calcula
+
+1. **Verificar que los 3 modelos YOLO existen** en `models_yolo/` (`cow.pt`, `eye.pt`, `sticker.pt`)
+2. **Activar debug** en la UI al procesar video y revisar la consola del servidor
+3. **Ejecutar `diagnose_weight.py`** para analizar los logs
+4. Causas comunes:
+   - No se detectan keypoints → la vaca no está de cuerpo entero en la imagen
+   - No se detectan ojos → la vaca no está de perfil (vista lateral)
+   - No se detectan postes → no hay postes rojos visibles o el modelo `sticker.pt` no los reconoce
+   - Keypoints con confianza < 0.3 → mejorar calidad de imagen o iluminación
+
+### El reconocimiento es incorrecto
+
+1. **Verificar el dataset**: cada `animal_N/` debe tener ~10-20 imágenes variadas de la cara
+2. **Reentrenar** con más epochs o más imágenes
+3. **Ejecutar `diagnose_model.py`** para ver la precisión por animal
+4. Si la confianza es siempre baja (< 50%), el modelo puede necesitar más datos de entrenamiento
+
+### Puerto 5001 ocupado
+
+macOS usa el puerto 5000 para AirPlay. El servidor usa 5001 por defecto. Si está ocupado, modificar la línea final de `app.py`:
 
 ```python
-from keras_vggface.vggface import VGGFace
-
-# Based on VGG16 architecture -> old paper(2015)
-vggface = VGGFace(model='vgg16') # or VGGFace() as default
-
-# Based on RESNET50 architecture -> new paper(2017)
-vggface = VGGFace(model='resnet50')
-
-# Based on SENET50 architecture -> new paper(2017)
-vggface = VGGFace(model='senet50')
-```
-Tanto en su versión:
- 
-```python 
-include_top=False
-``` 
-que permiten quedarte sólo con la parte convolucional de la red para hacer un stacking superior de un clasificador a placer
-
-Como en la versión 
-```python 
-include_top=True
-```
-la cual incluye la parte de clasificación original con todas las capas densas, lo que lo hace más pesado.
-
-Los pesos para los modelos se pueden obtener en el [siguiente enlace](https://github.com/eblancoh/cattle-recognition/releases/tag/v0.1-downloads).
-
-## Setup del entorno
-
-Se recomienda hacer uso de Anaconda para la creación de un entorno virtual.
-
-```bash 
-$ conda create --name <env> --file requirements.txt
+app.run(host='0.0.0.0', port=5002, debug=True)
 ```
 
-## Ejemplo de uso
+### Error al cargar modelo
 
-### 1. Data Cleaning (opcional)
-
-Para evitar la baja varianza entre imágenes se emplea la medida del índice de similitud estructural (SSIM) para medir la similitud entre fotografías. Esto ayuda a evitar datos muy similares (casi idénticos en las particiones de datos de validación y entrenamiento.
-
-En los subdirectorios anidados de `./dataset` se checkea una imagen contra todas las demás y se van eliminando aquellas que sean similares por encima de un valor de similitud (entre `0` y `1`) indicado por el usuario.
-
-```bash
-$ python ssim.py --dir "dir/to/images" --threshold 0.95
-```
-
-### 2. Entrenamiento
-
-Ejemplo del entrenamiento de un dataset de imágenes:
-```bash
-$ python training.py --granja test --model resnet50 --epochs 20 --batch_size 30
-```
-La rutina realiza el entrenamiento, guarda el mejor checkpoint y devuelve un reporte de clasificación sobre el test dataset.
-
-#### 2.1. Customización de arquitectura para Transfer Learning
-El script `training.py` se lanza tal y como se muestra arriba. Este script entrena una Red Neuronal convolucional que puede ser `vgg16`, `resnet50` o `senet50` y que acaba en un clasificador que, por defecto, tiene la siguiente implementación `Sequential` de Keras:
-
-```python
-self.x = self.last_layer
-self.x = Dense(self.hidden_dim_1, activation='relu', name='fc1')(self.x)
-self.x = Dense(self.hidden_dim_2, activation='relu', name='fc2')(self.x)
-self.x = Dense(self.hidden_dim_3, activation='relu', name='fc3')(self.x)
-self.out = Dense(self.nb_class, activation='softmax', name='out')(self.x)
-```
-Clasificador de capas densas totalmente conectadas que se meten tras la capa `flatten` de los modelos convolucionales.
-
-`TODO:` ver si la regularización por Dropout mejora la performance de los modelos.
-
-#### 2.2. Congelación de capas para Fine-Tuning
-Normalmente, para Transfer Learning y Fine-Tuning de modelos con dataset pequeños, lo que se hace es congelar la arquitectira transferida y entrenar sólamente el clasificador customizado por nosotros. El número de capas a definir como entrenables se especifica en la función `main()` en la línea `277`:
-* `nb_freeze = None` indica que no se congela ninguna capa. Todas las capas son entrenables.
-* `nb_freeze = 10` indica que se congelan las 10 primeras capas. Las restantes son entrenables por defecto.
-* `nb_freeze = -4` indica que se congelan todas menos las 4 últimas capas. Las restantes son entrenables por defecto.
-
-#### 2.3. Dataset
-El dataset sobre el que se desea entrenar debe situarse en la carpeta `./dataset`. Para cada clase, se deben agrupar todas las imágenes en subdirectorios. 
-
-Los batches de entrenamiento, validación, así como el núemro de clases a predecir y, por lo tanto, la arquitectura de salida del modelo, están definidas tanto por el generador `ImageDataGenerator()` como por la función `flow_from_directory()`.
-
-Sobre el dataset disponible se hace data augmentation:
-* **Rotación aleatoria** de cada imagen de hasta `20 grados`;
-* **Desplazamiento en altura y anchura** de hasta el `5%` de la dimensión de la imagen;
-* **Horizontal flipping**.
-
-#### 2.4. Logueo del entrenamiento
-
-Para el entrenamiento se han definido dos callbacks: 
-* **EarlyStopping** para evitar overfitting o alargar innecesariamente el tiempo de entrenamiento. 
-* **TensorBoard Callback** que permite logar precisión y funciones de pérdida para su visualización en browser de las curvas de aprendizaje y del grafo creado y entrenado.
-
-```bash
-$ cd logs/folder_tbd/
-$ tensorboard --logdir=./ --port 6006
-```
-
-De manera que con sólo ir a tu navegador a `http://localhost:6006/` se puede visualizar cómo ha transcurrido el entrenamiento. Ver el [siguiente artículo](https://itnext.io/how-to-use-tensorboard-5d82f8654496) para aclarar dudas.
-
-### 3. Testeo
-De cara al testeo de un modelo ya entrenado con una imagen de muestra, se ejecuta el script `testing.py`:
-```bash
-$ python testing.py --granja test  --img "path/to/img"
-```
-
-Esta rutina devuelve las predicciones de una imagen en base a todas las clases soportadas por el modelo. La rutina devuelve:
-
-```bash
-$ python testing.py --granja test  --img "path/to/img"
-{
-    "class 0": score 0,
-    "class 1": score 1,
-    ...
-    "class N": score N
-}
-```
-
-### 4. Grad-CAM Checking
-
-Un inconveniente frecuentemente citado del uso de redes neuronales es que entender exactamente lo que están modelando es muy difícil. Esto se complica aún más utilizando redes profundas. Sin embargo, esto ha comenzado a atraer una gran cantidad de interés de investigación, especialmente para las CNNs para garantizar que la "atención" de la red se centre en las características reales y discriminativas del propio animal, en lugar de otras partes de la imagen que puedan contener información discriminatoria (por ejemplo, una etiqueta de clase, una marca de tiempo impresa en la imagen o un borde sin interés).
-
-Para comprobar que nuestro modelo se centra en partes interesantes de la imagen, se puede elegir una imagen de prueba y comprobar qué regiones son de interés para la red neuronal, se puede ejecutar:
-
-```bash
-$ python grad_CAM.py --granja test --model resnet50 --img "path/to/img"
-```
-Lo cual te devuelve un mapa de calor sobre la imagen de las regiones de interés.
-
-## Enlaces de Soporte e Interés:
-
-* [Keras Framework](www.keras.io)
-* [Oxford VGGFace Website](http://www.robots.ox.ac.uk/~vgg/software/vgg_face/)
-* [Arkhi et al.: Deep Face Recognition](http://www.robots.ox.ac.uk/~vgg/publications/2015/Parkhi15/parkhi15.pdf)
-* [Towards on-farm pig face recognition using convolutional neural networks](https://www.sciencedirect.com/science/article/pii/S0166361517304992?via%3Dihub#fig0025)
-* [VGGFace implementation with Keras Framework](https://github.com/rcmalli/keras-vggface)
-* [Deep Learning For Beginners Using Transfer Learning In Keras](https://towardsdatascience.com/keras-transfer-learning-for-beginners-6c9b8b7143e)
-* [Transfer learning from pre-trained models](https://towardsdatascience.com/transfer-learning-from-pre-trained-models-f2393f124751)
-* [Transfer Learning using Keras](https://medium.com/@14prakash/transfer-learning-using-keras-d804b2e04ef8)
-* [Tutorial on using Keras `flow_from_directory()` and generators](https://medium.com/@vijayabhaskar96/tutorial-image-classification-with-keras-flow-from-directory-and-generators-95f75ebe5720)
-* [Transfer learning and Image classification using Keras on Kaggle kernels](https://towardsdatascience.com/transfer-learning-and-image-classification-using-keras-on-kaggle-kernels-c76d3b030649)
-* [A Comprehensive Hands-on Guide to Transfer Learning with Real-World Applications in Deep Learning](https://towardsdatascience.com/a-comprehensive-hands-on-guide-to-transfer-learning-with-real-world-applications-in-deep-learning-212bf3b2f27a)
-* [Gradient-weighted Class Activation Mapping - Grad-CAM](https://medium.com/@mohamedchetoui/grad-cam-gradient-weighted-class-activation-mapping-ffd72742243a)
-* [Keras implementation of GradCAM](https://github.com/eclique/keras-gradcam/blob/master/gradcam_vgg.ipynb)
-* [Grad-CAM with keras-vis](https://fairyonice.github.io/Grad-CAM-with-keras-vis.html)
-* [A Python module for computing the Structural Similarity Image Metric (SSIM)](https://github.com/jterrace/pyssim)
-
-# Licencia
-This is free and unencumbered software released into the public domain. Anyone is free to copy, modify, publish, use, compile, sell, or distribute this software, either in source code form or as a compiled binary, for any purpose, commercial or non-commercial, and by any means.
-
-In jurisdictions that recognize copyright laws, the author or authors of this software dedicate any and all copyright interest in the software to the public domain. We make this dedication for the benefit of the public at large and to the detriment of our heirs and successors. We intend this dedication to be an overt act of relinquishment in perpetuity of all present and future rights to this software under copyright law.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+- Verificar que `checkpoints/<granja>/chckpt.best.h5` existe
+- Verificar que `checkpoints/<granja>/labels.json` existe y tiene el formato correcto
+- Verificar compatibilidad de la versión de TensorFlow/Keras con el checkpoint

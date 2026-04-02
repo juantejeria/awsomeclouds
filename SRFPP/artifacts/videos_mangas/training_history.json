@@ -1,0 +1,35 @@
+[
+  {
+    "display_name": "Videos Mangas",
+    "best_val_acc": 1.0,
+    "val_acc": 1.0,
+    "train_acc": 0.9479166666666666,
+    "val_loss": 0.26718204220136005,
+    "train_loss": 0.39330945909023285,
+    "total_epochs": 10,
+    "elapsed_time": 137.0258150100708,
+    "completed_at": "2026-02-16T13:46:35.667468"
+  },
+  {
+    "display_name": "Videos Mangas",
+    "best_val_acc": 1.0,
+    "val_acc": 1.0,
+    "train_acc": 0.9868421052631579,
+    "val_loss": 0.1250707060098648,
+    "train_loss": 0.1842551301968725,
+    "total_epochs": 30,
+    "elapsed_time": 161.08094906806946,
+    "completed_at": "2026-02-16T12:55:33.150815"
+  },
+  {
+    "display_name": "Videos Mangas",
+    "best_val_acc": 1.0,
+    "val_acc": 1.0,
+    "train_acc": 0.9868421052631579,
+    "val_loss": 0.21682845652103425,
+    "train_loss": 0.297585434035251,
+    "total_epochs": 10,
+    "elapsed_time": 96.5698549747467,
+    "completed_at": "2026-02-13T18:25:57.712477"
+  }
+]

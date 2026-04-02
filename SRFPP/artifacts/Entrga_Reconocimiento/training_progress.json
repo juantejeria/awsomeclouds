@@ -1,0 +1,13 @@
+{
+  "status": "completed",
+  "current_epoch": 22,
+  "total_epochs": 30,
+  "progress_percent": 100.0,
+  "train_loss": 0.5497315885030736,
+  "train_acc": 0.9152046783625731,
+  "val_loss": 0.633567561936933,
+  "val_acc": 0.8372093023255814,
+  "best_val_acc": 0.872093023255814,
+  "elapsed_time": 1173.6375260353088,
+  "display_name": "Entrga Reconocimiento"
+}

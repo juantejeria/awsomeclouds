@@ -1,0 +1,13 @@
+{
+  "status": "completed",
+  "current_epoch": 21,
+  "total_epochs": 30,
+  "progress_percent": 100.0,
+  "train_loss": 0.43224235657838894,
+  "train_acc": 0.9939577039274925,
+  "val_loss": 0.4745159220982747,
+  "val_acc": 0.963855421686747,
+  "best_val_acc": 0.963855421686747,
+  "elapsed_time": 1594.4751081466675,
+  "display_name": "desfile26marz"
+}

@@ -24,6 +24,7 @@ def train_model(
     yolo_require_features: list[str] | None = None,
     balance_dataset: bool = True,
     balance_similarity_threshold: float = 0.85,
+    crop_to_face: bool = True,
 ) -> subprocess.Popen:
     """Inicia el entrenamiento de un modelo en background."""
     data_dir = get_establecimiento_dir(establecimiento)
@@ -63,7 +64,11 @@ def train_model(
     if balance_dataset:
         cmd.extend(["--balance_dataset"])
         cmd.extend(["--balance_similarity_threshold", str(balance_similarity_threshold)])
-    
+
+    # Agregar opción de recorte facial
+    if crop_to_face:
+        cmd.extend(["--crop_to_face"])
+
     # Ejecutar en background pero mostrar output en terminal
     # Usar None para stdout/stderr hace que se muestre en la terminal actual
     process = subprocess.Popen(

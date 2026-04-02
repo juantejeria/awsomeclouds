@@ -1,0 +1,20 @@
+[
+  {
+    "timestamp": "2026-01-19T23:33:20.670130",
+    "file_name": "camera_20260119_233320.jpg",
+    "file_type": "imagen",
+    "result": "v1_vaca_367",
+    "confidence": 0.5854242444038391,
+    "decision": "unknown",
+    "threshold": 0.7
+  },
+  {
+    "timestamp": "2026-01-19T23:33:15.303787",
+    "file_name": "camera_20260119_233314.jpg",
+    "file_type": "imagen",
+    "result": "v1_vaca_367",
+    "confidence": 0.5854242444038391,
+    "decision": "unknown",
+    "threshold": 0.7
+  }
+]

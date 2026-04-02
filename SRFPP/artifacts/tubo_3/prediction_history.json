@@ -1,0 +1,19 @@
+[
+  {
+    "timestamp": "2026-03-05T11:10:44.331134",
+    "file_name": "CB_Pasada_Portera_Tubo_3.mp4",
+    "file_type": "video",
+    "result": "v11",
+    "confidence": 0.2947633396834135,
+    "decision": "unknown",
+    "threshold": 0.7,
+    "stride": 1,
+    "max_frames": 600,
+    "yolo_detection": true,
+    "multi_animal": true,
+    "animals_tracked": 3,
+    "frames_with_detections": 142,
+    "frames_without_detections": 1636,
+    "total_frames_extracted": 1778
+  }
+]

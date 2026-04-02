@@ -1,0 +1,107 @@
+[
+  {
+    "timestamp": "2026-01-21T09:05:16.607869",
+    "file_name": "Screenshot 2026-01-15 at 14.30.27.png",
+    "file_type": "imagen",
+    "result": "m_recorete_v450",
+    "confidence": 0.8097965717315674,
+    "decision": "known",
+    "threshold": 0.7
+  },
+  {
+    "timestamp": "2026-01-19T23:34:28.888510",
+    "file_name": "357.MOV",
+    "file_type": "video",
+    "result": "m_recorete_v450",
+    "confidence": 0.4200509190559387,
+    "decision": "unknown",
+    "threshold": 0.7,
+    "stride": 5,
+    "max_frames": 150
+  },
+  {
+    "timestamp": "2026-01-19T23:33:39.876761",
+    "file_name": "camera_20260119_233339.jpg",
+    "file_type": "imagen",
+    "result": "m_recorete_v424",
+    "confidence": 0.4173259139060974,
+    "decision": "unknown",
+    "threshold": 0.7
+  },
+  {
+    "timestamp": "2026-01-19T23:33:28.685866",
+    "file_name": "camera_20260119_233328.jpg",
+    "file_type": "imagen",
+    "result": "m_recorete_v424",
+    "confidence": 0.4173259139060974,
+    "decision": "unknown",
+    "threshold": 0.7
+  },
+  {
+    "timestamp": "2026-01-19T23:33:01.998855",
+    "file_name": "camera_20260119_233301.jpg",
+    "file_type": "imagen",
+    "result": "m_recorete_v424",
+    "confidence": 0.4173259139060974,
+    "decision": "unknown",
+    "threshold": 0.7
+  },
+  {
+    "timestamp": "2026-01-19T23:12:32.887514",
+    "file_name": "camera_20260119_231232.jpg",
+    "file_type": "imagen",
+    "result": "m_recorete_v424",
+    "confidence": 0.4516952633857727,
+    "decision": "unknown",
+    "threshold": 0.7
+  },
+  {
+    "timestamp": "2026-01-13T09:55:28.307384",
+    "file_name": "Screenshot 2026-01-09 at 15.41.56.png",
+    "file_type": "imagen",
+    "result": "m_recorete_v5937",
+    "confidence": 0.7013342380523682,
+    "decision": "known",
+    "threshold": 0.7
+  },
+  {
+    "timestamp": "2026-01-13T09:53:40.205999",
+    "file_name": "357.MOV",
+    "file_type": "video",
+    "result": "m_recorete_v450",
+    "confidence": 0.37315094470977783,
+    "decision": "unknown",
+    "threshold": 0.7,
+    "stride": 1,
+    "max_frames": 150
+  },
+  {
+    "timestamp": "2026-01-12T21:54:09.128151",
+    "file_name": "Screenshot 2026-01-09 at 15.41.56.png",
+    "file_type": "imagen",
+    "result": "m_recorete_v5937",
+    "confidence": 0.7013342380523682,
+    "decision": "known",
+    "threshold": 0.7
+  },
+  {
+    "timestamp": "2026-01-12T21:53:46.398378",
+    "file_name": "Screenshot 2026-01-06 at 07.05.51.png",
+    "file_type": "imagen",
+    "result": "m_recorete_v5937",
+    "confidence": 0.32788270711898804,
+    "decision": "unknown",
+    "threshold": 0.7
+  },
+  {
+    "timestamp": "2026-01-12T21:52:57.879628",
+    "file_name": "Screen Recording 2026-01-09 at 11.48.37.mov",
+    "file_type": "video",
+    "result": "m_recorete_v357",
+    "confidence": 0.419156551361084,
+    "decision": "unknown",
+    "threshold": 0.7,
+    "stride": 10,
+    "max_frames": 150
+  }
+]

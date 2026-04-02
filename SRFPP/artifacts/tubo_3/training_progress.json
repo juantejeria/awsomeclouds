@@ -1,0 +1,13 @@
+{
+  "status": "completed",
+  "current_epoch": 19,
+  "total_epochs": 20,
+  "progress_percent": 100.0,
+  "train_loss": 0.41960029981353064,
+  "train_acc": 0.9659090909090909,
+  "val_loss": 0.42927660887891594,
+  "val_acc": 0.9545454545454546,
+  "best_val_acc": 0.9727272727272728,
+  "elapsed_time": 1512.0249218940735,
+  "display_name": "Tubo 3"
+}

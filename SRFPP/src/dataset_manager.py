@@ -262,18 +262,28 @@ def extract_frames_from_uploaded_video(
     max_frames: int = 50,
     filter_faces: bool = False,
     require_features: list[str] | None = None,
+    crop_to_face: bool = True,
 ) -> int:
     """
     Extrae frames de un video y los guarda como imágenes.
-    
+
+    When ``crop_to_face`` is True (default), each frame is run through the
+    cattle-face detector.  If a face is found the saved image is the face
+    crop; otherwise it falls back to a body crop; and if neither is
+    detected the full frame is saved (or skipped if ``filter_faces`` is
+    also True).
+
     Args:
         video_path: Ruta al video
         output_dir: Directorio de salida
         stride: Cada cuántos frames extraer
         max_frames: Máximo frames a extraer
-        filter_faces: Si True, solo guarda frames con rostro detectado
+        filter_faces: Si True, solo guarda frames con animal detectado
         require_features: Lista de características requeridas (ej: ["face", "eyes"])
-    
+        crop_to_face: Si True, recorta cada frame al rostro / cuerpo
+                      detectado antes de guardar (recomendado para
+                      datasets de reconocimiento facial).
+
     Returns:
         Número de frames guardados
     """
@@ -281,39 +291,228 @@ def extract_frames_from_uploaded_video(
     
     saved_count = 0
     skipped_count = 0
+    face_crop_count = 0
+    body_crop_count = 0
     
     for frame in iter_video_frames(str(video_path), stride=stride, max_frames=max_frames):
         from PIL import Image
+        import numpy as np
         img = Image.fromarray(frame.rgb)
-        
-        # Filtrar por detección de rostro si está habilitado
-        if filter_faces:
+
+        save_img = img  # default: full frame
+
+        # ------------------------------------------------------------------
+        # Face / body crop
+        # ------------------------------------------------------------------
+        if crop_to_face:
             try:
-                # Por defecto, requerir específicamente vacas para entrenamiento de individuos
+                from .face_detection import detect_best_boxes
+                detections = detect_best_boxes(frame.rgb)
+                if detections:
+                    best = detections[0]
+                    px1, py1, px2, py2 = best["bbox_padded"]
+                    crop = frame.rgb[int(py1):int(py2), int(px1):int(px2)]
+                    if crop.size > 0 and crop.shape[0] >= 10 and crop.shape[1] >= 10:
+                        save_img = Image.fromarray(crop)
+                        if best.get("is_face", False):
+                            face_crop_count += 1
+                        else:
+                            body_crop_count += 1
+                    elif filter_faces:
+                        skipped_count += 1
+                        continue
+                elif filter_faces:
+                    # No detection at all and filtering is on → skip
+                    skipped_count += 1
+                    continue
+            except Exception:
+                pass  # keep full frame on error
+
+        # ------------------------------------------------------------------
+        # Legacy filter (non-crop mode): just check presence
+        # ------------------------------------------------------------------
+        elif filter_faces:
+            try:
                 if require_features is None:
                     from .face_detection import detect_cow_specifically
                     has_valid = detect_cow_specifically(img, min_confidence=0.3)
                 else:
                     from .face_detection import has_valid_animal_frame
                     has_valid = has_valid_animal_frame(img, require_features=require_features)
-                
+
                 if not has_valid:
                     skipped_count += 1
                     continue
-            except Exception as e:
-                # Si falla la detección, guardar el frame de todas formas
-                # (mejor tener datos que perderlos por un error)
+            except Exception:
                 pass
-        
-        frame_filename = f"frame_{frame.idx:06d}.jpg"
+
+        frame_filename = f"vid_frame_{frame.idx:06d}.jpg"
         frame_path = output_dir / frame_filename
-        img.save(frame_path, quality=95)
+        save_img.save(frame_path, quality=95)
         saved_count += 1
     
-    if filter_faces and skipped_count > 0:
-        print(f"  (Se omitieron {skipped_count} frames sin rostro detectado)")
+    if skipped_count > 0:
+        print(f"  (Se omitieron {skipped_count} frames sin detección)")
+    if crop_to_face:
+        print(f"  Crops: {face_crop_count} rostros, {body_crop_count} cuerpos, "
+              f"{saved_count - face_crop_count - body_crop_count} sin crop")
     
     return saved_count
+
+
+def crop_image_to_face(
+    image_path: Path,
+    output_path: Path | None = None,
+    min_confidence: float = 0.25,
+) -> bool:
+    """
+    Detect the cow face (or body fallback) in an image and overwrite/save
+    the file with only the cropped region.
+
+    Args:
+        image_path: Path to the source image.
+        output_path: Where to save the crop. If *None*, overwrites the
+                     original file.
+        min_confidence: Minimum YOLO confidence for face/body detection.
+
+    Returns:
+        True if a crop was applied, False if no detection was found
+        (the original image is kept as-is in that case).
+    """
+    from PIL import Image as PILImage
+    import numpy as np
+    from .face_detection import detect_best_boxes
+
+    try:
+        img = PILImage.open(image_path).convert("RGB")
+        img_array = np.array(img)
+
+        detections = detect_best_boxes(
+            img_array,
+            face_min_confidence=min_confidence,
+            body_min_confidence=min_confidence + 0.05,
+        )
+
+        if not detections:
+            # No detection – keep the full image
+            if output_path and output_path != image_path:
+                img.save(output_path, quality=95)
+            return False
+
+        best = detections[0]
+        px1, py1, px2, py2 = best["bbox_padded"]
+        crop = img_array[int(py1):int(py2), int(px1):int(px2)]
+
+        if crop.size == 0 or crop.shape[0] < 10 or crop.shape[1] < 10:
+            if output_path and output_path != image_path:
+                img.save(output_path, quality=95)
+            return False
+
+        crop_img = PILImage.fromarray(crop)
+        dest = output_path or image_path
+        crop_img.save(dest, quality=95)
+        return True
+
+    except Exception:
+        # On any error, keep the original image untouched
+        if output_path and output_path != image_path:
+            try:
+                shutil.copy2(str(image_path), str(output_path))
+            except Exception:
+                pass
+        return False
+
+
+def crop_dataset_to_faces(
+    data_dir: Path,
+    output_dir: Path,
+    min_confidence: float = 0.25,
+) -> dict:
+    """
+    Create a face-cropped copy of an entire ImageFolder dataset.
+
+    For each image in *data_dir* (organised as class-sub-folders), the
+    function detects the cow face (with body fallback) and writes the
+    cropped version to the mirror location under *output_dir*.  If no
+    detection is found the full image is copied unchanged.
+
+    Args:
+        data_dir: Root of the source ImageFolder.
+        output_dir: Root of the destination (created if it doesn't exist).
+        min_confidence: Minimum YOLO confidence.
+
+    Returns:
+        Dictionary with stats:
+        ``{"total", "face_cropped", "body_cropped", "no_detection"}``
+    """
+    from PIL import Image as PILImage
+    import numpy as np
+    from .face_detection import detect_best_boxes
+
+    img_exts = {".jpg", ".jpeg", ".png", ".bmp"}
+    stats = {"total": 0, "face_cropped": 0, "body_cropped": 0, "no_detection": 0}
+
+    for class_dir in sorted(data_dir.iterdir()):
+        if not class_dir.is_dir():
+            continue
+        out_class_dir = output_dir / class_dir.name
+        out_class_dir.mkdir(parents=True, exist_ok=True)
+
+        for img_path in sorted(class_dir.iterdir()):
+            if img_path.suffix.lower() not in img_exts:
+                # Copy non-image files (meta.json, etc.) as-is
+                dest = out_class_dir / img_path.name
+                if img_path.is_file():
+                    shutil.copy2(str(img_path), str(dest))
+                continue
+
+            stats["total"] += 1
+            dest = out_class_dir / img_path.name
+
+            try:
+                img = PILImage.open(img_path).convert("RGB")
+                img_array = np.array(img)
+
+                detections = detect_best_boxes(
+                    img_array,
+                    face_min_confidence=min_confidence,
+                    body_min_confidence=min_confidence + 0.05,
+                )
+
+                if not detections:
+                    img.save(dest, quality=95)
+                    stats["no_detection"] += 1
+                    continue
+
+                best = detections[0]
+                px1, py1, px2, py2 = best["bbox_padded"]
+                crop = img_array[int(py1):int(py2), int(px1):int(px2)]
+
+                if crop.size == 0 or crop.shape[0] < 10 or crop.shape[1] < 10:
+                    img.save(dest, quality=95)
+                    stats["no_detection"] += 1
+                    continue
+
+                PILImage.fromarray(crop).save(dest, quality=95)
+
+                if best.get("is_face", False):
+                    stats["face_cropped"] += 1
+                else:
+                    stats["body_cropped"] += 1
+
+            except Exception:
+                # On error, copy original
+                try:
+                    shutil.copy2(str(img_path), str(dest))
+                except Exception:
+                    pass
+                stats["no_detection"] += 1
+
+            if stats["total"] % 20 == 0:
+                print(f"   Pre-procesando imágenes... {stats['total']} procesadas", end="\r")
+
+    print(f"   Pre-procesamiento completado: {stats['total']} imágenes                ")
+    return stats
 
 
 def _sanitize_name(name: str) -> str:

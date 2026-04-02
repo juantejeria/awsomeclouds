@@ -25,7 +25,7 @@ from tqdm import tqdm
 
 from .io_utils import ensure_dir, write_json
 from .dataset_manager import get_establecimiento_display_name
-from .model import build_model
+from .model import build_model, freeze_backbone, unfreeze_last_block, unfreeze_all
 from .filtered_dataset import FilteredImageFolder
 
 
@@ -124,6 +124,7 @@ def main():
     p.add_argument("--yolo_require_features", nargs="+", choices=["cow", "animal"], help="Características requeridas para YOLO (ej: --yolo_require_features cow)")
     p.add_argument("--balance_dataset", action="store_true", help="Balancear dataset eliminando frames similares antes de entrenar")
     p.add_argument("--balance_similarity_threshold", type=float, default=0.85, help="Umbral de similitud para balanceo (0-1, más alto = más estricto)")
+    p.add_argument("--crop_to_face", action="store_true", help="Pre-procesar dataset recortando cada imagen al rostro/cuerpo detectado antes de entrenar")
     args = p.parse_args()
 
     dev = _device()
@@ -133,9 +134,13 @@ def main():
 
     train_tfm = transforms.Compose(
         [
-            transforms.RandomResizedCrop((args.img_size, args.img_size), scale=(0.7, 1.0)),
+            transforms.RandomResizedCrop((args.img_size, args.img_size), scale=(0.6, 1.0)),
             transforms.RandomHorizontalFlip(p=0.5),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.02),
+            transforms.RandomRotation(degrees=15),
+            transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1)),
+            transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.05),
+            transforms.RandomGrayscale(p=0.05),
+            transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ]
@@ -147,6 +152,9 @@ def main():
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ]
     )
+
+    # Archivo de progreso para la UI (definir temprano para manejo de errores)
+    progress_file = artifacts_dir / "training_progress.json"
 
     # Balancear dataset si se solicita (antes de cargar)
     original_data_dir = args.data_dir
@@ -175,6 +183,29 @@ def main():
         
         # Usar el dataset balanceado para el entrenamiento
         args.data_dir = str(temp_balanced_dir)
+
+    # --- Pre-procesar dataset: recortar imágenes a rostro/cuerpo ---
+    if args.crop_to_face:
+        print("\n🔍 Pre-procesando dataset: recortando a rostro/cuerpo de vaca...")
+        from .dataset_manager import crop_dataset_to_faces
+        import tempfile
+
+        source_dir = Path(args.data_dir)
+        temp_face_dir = Path(tempfile.mkdtemp(prefix="face_cropped_dataset_"))
+
+        crop_stats = crop_dataset_to_faces(
+            data_dir=source_dir,
+            output_dir=temp_face_dir,
+        )
+
+        print(f"\n✅ Pre-procesamiento de rostros completado:")
+        print(f"   Total imágenes:  {crop_stats['total']}")
+        print(f"   Rostros (face):  {crop_stats['face_cropped']}")
+        print(f"   Cuerpos (body):  {crop_stats['body_cropped']}")
+        print(f"   Sin detección:   {crop_stats['no_detection']} (se mantiene imagen completa)")
+
+        # Use the face-cropped dataset from now on
+        args.data_dir = str(temp_face_dir)
 
     # We load twice to allow different transforms per split
     # Usar FilteredImageFolder si se solicita filtrado con YOLO
@@ -250,15 +281,61 @@ def main():
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=num_workers)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=num_workers)
 
-    model = build_model(num_classes=len(base_ds.classes), pretrained=True).to(dev)
-    loss_fn = nn.CrossEntropyLoss()
-    optim = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    # --- Regularización adaptada al tamaño del dataset ---
+    # Datasets pequeños (<30 imgs/clase) necesitan menos regularización
+    targets_all = [y for _, y in base_ds.samples]
+    class_counts = Counter(targets_all)
+    n_classes = len(base_ds.classes)
+    avg_samples_per_class = len(targets_all) / max(n_classes, 1)
+
+    # Ajustar regularización según tamaño del dataset
+    if avg_samples_per_class < 30:
+        dropout_val = 0.15
+        label_smooth = 0.02
+        print(f"📊 Dataset pequeño ({avg_samples_per_class:.0f} imgs/clase promedio) → "
+              f"regularización ligera (dropout={dropout_val}, label_smooth={label_smooth})")
+    elif avg_samples_per_class < 100:
+        dropout_val = 0.25
+        label_smooth = 0.05
+        print(f"📊 Dataset mediano ({avg_samples_per_class:.0f} imgs/clase promedio) → "
+              f"regularización moderada (dropout={dropout_val}, label_smooth={label_smooth})")
+    else:
+        dropout_val = 0.4
+        label_smooth = 0.1
+        print(f"📊 Dataset grande ({avg_samples_per_class:.0f} imgs/clase promedio) → "
+              f"regularización completa (dropout={dropout_val}, label_smooth={label_smooth})")
+
+    model = build_model(num_classes=n_classes, pretrained=True, dropout=dropout_val).to(dev)
+
+    # --- Class-weighted loss with label smoothing ---
+    # Inverse-frequency weights, normalized
+    class_weights = torch.tensor(
+        [1.0 / class_counts.get(i, 1) for i in range(n_classes)],
+        dtype=torch.float,
+    )
+    class_weights = class_weights / class_weights.sum() * n_classes
+    loss_fn = nn.CrossEntropyLoss(weight=class_weights.to(dev), label_smoothing=label_smooth)
+
+    # --- Gradual fine-tuning schedule ---
+    # Phase 1: freeze backbone, train only classifier head
+    # Phase 2: unfreeze layer4 + head
+    # Divide epochs: ~40% phase 1, ~60% phase 2
+    phase1_epochs = max(1, int(args.epochs * 0.4))
+    phase2_start = phase1_epochs + 1
+
+    freeze_backbone(model)
+    print(f"\n🧊 Fase 1 (épocas 1-{phase1_epochs}): backbone congelado, solo cabeza clasificadora")
+    print(f"🔥 Fase 2 (épocas {phase2_start}-{args.epochs}): descongelando layer4 + cabeza\n")
+
+    # Phase 1 optimizer: only fc params, higher LR for new head
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    optim = torch.optim.AdamW(trainable_params, lr=args.lr * 5, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optim, T_max=phase1_epochs, eta_min=args.lr)
 
     best_val_acc = -1.0
     best_state = None
-    
-    # Archivo de progreso para la UI
-    progress_file = artifacts_dir / "training_progress.json"
+    early_stop_patience = 5
+    epochs_without_improvement = 0
 
     t0 = time.time()
     
@@ -292,15 +369,37 @@ def main():
         "message": f"Modelo inicializado. Comenzando entrenamiento con {len(train_ds)} imágenes de entrenamiento y {len(val_ds)} de validación.",
     })
     
+    final_epoch = args.epochs
+    tr_loss = 0.0
+    tr_acc = 0.0
+    va_loss = 0.0
+    va_acc = 0.0
+
     for epoch in range(1, args.epochs + 1):
+        # --- Phase transition: unfreeze layer4 at phase2_start ---
+        if epoch == phase2_start:
+            unfreeze_last_block(model)
+            # New optimizer with all trainable params and lower LR
+            trainable_params = [p for p in model.parameters() if p.requires_grad]
+            optim = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=1e-4)
+            remaining_epochs = args.epochs - phase1_epochs
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optim, T_max=remaining_epochs, eta_min=args.lr * 0.1,
+            )
+            epochs_without_improvement = 0  # Reset early stopping for phase 2
+            print(f"\n🔥 Fase 2: layer4 descongelado (lr={args.lr})\n")
+
         tr_loss, tr_acc = train_one_epoch(model, train_loader, optim, loss_fn, dev)
         va_loss, va_acc = eval_one_epoch(model, val_loader, loss_fn, dev)
+        scheduler.step()
         
         elapsed = time.time() - t0
         progress_percent = (epoch / args.epochs) * 100
+        phase_str = "fase1-head" if epoch <= phase1_epochs else "fase2-finetune"
+        current_lr = optim.param_groups[0]["lr"]
         
         print(
-            f"epoch={epoch:02d}/{args.epochs} "
+            f"epoch={epoch:02d}/{args.epochs} [{phase_str}] lr={current_lr:.2e} "
             f"train_loss={tr_loss:.4f} train_acc={tr_acc:.3f} "
             f"val_loss={va_loss:.4f} val_acc={va_acc:.3f}"
         )
@@ -317,11 +416,31 @@ def main():
             "val_acc": float(va_acc),
             "best_val_acc": float(best_val_acc),
             "elapsed_time": float(elapsed),
+            "phase": phase_str,
+            "learning_rate": float(current_lr),
         })
 
         if va_acc > best_val_acc:
             best_val_acc = va_acc
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+
+        # Early stopping (per phase)
+        if epochs_without_improvement >= early_stop_patience:
+            if epoch <= phase1_epochs:
+                # Skip to phase 2 early
+                print(f"\n⏩ Early stop fase 1 en época {epoch} (sin mejora en {early_stop_patience} épocas). Pasando a fase 2...")
+                phase1_epochs = epoch  # Adjust so phase 2 starts next
+                # phase2_start logic handled by the condition at top of loop
+                # Force phase2_start for next iteration
+                phase2_start = epoch + 1
+                epochs_without_improvement = 0
+            else:
+                print(f"\n⏹️  Early stopping en época {epoch} (sin mejora en {early_stop_patience} épocas)")
+                final_epoch = epoch
+                break
 
     elapsed = time.time() - t0
     if best_state is None:
@@ -336,8 +455,14 @@ def main():
             "val_frac": args.val_frac,
             "seed": args.seed,
             "epochs": args.epochs,
+            "epochs_trained": final_epoch,
             "batch_size": args.batch_size,
             "lr": args.lr,
+            "weight_decay": 1e-4,
+            "label_smoothing": label_smooth,
+            "dropout": dropout_val,
+            "gradual_unfreeze": True,
+            "early_stopping_patience": early_stop_patience,
             "best_val_acc": float(best_val_acc),
             "device_used": str(dev),
             "train_seconds": float(elapsed),
@@ -347,7 +472,7 @@ def main():
     # Marcar entrenamiento como completado
     write_json(progress_file, {
         "status": "completed",
-        "current_epoch": args.epochs,
+        "current_epoch": final_epoch,
         "total_epochs": args.epochs,
         "progress_percent": 100.0,
         "train_loss": float(tr_loss),
@@ -362,7 +487,23 @@ def main():
     print(f"\nGuardado: {(artifacts_dir / 'model.pt').as_posix()}")
     print(f"Clases: {base_ds.classes}")
     print(f"Mejor val_acc: {best_val_acc:.3f}")
-    
+
+    # Generar centroides para open-set recognition
+    try:
+        print("\nGenerando centroides de embeddings...")
+        from .infer import compute_centroids, save_centroids
+        # Load best model for centroid computation
+        best_model = build_model(num_classes=n_classes, pretrained=False, dropout=dropout_val)
+        best_model.load_state_dict(torch.load(artifacts_dir / "model.pt", map_location="cpu"))
+        best_model.eval().to(dev)
+        centroids = compute_centroids(best_model, val_tfm, dev, Path(args.data_dir), base_ds.classes)
+        centroid_path = save_centroids(centroids, artifacts_dir)
+        print(f"Centroides guardados: {centroid_path} ({len(centroids)} clases)")
+    except Exception as e:
+        print(f"Advertencia: No se pudieron generar centroides: {e}")
+        import traceback
+        traceback.print_exc()
+
     # Generar reporte de entrenamiento
     try:
         print("\nGenerando reporte de entrenamiento...")

@@ -1,0 +1,17 @@
+{
+  "img_size": 224,
+  "val_frac": 0.2,
+  "seed": 42,
+  "epochs": 20,
+  "epochs_trained": 19,
+  "batch_size": 16,
+  "lr": 0.0001,
+  "weight_decay": 0.0001,
+  "label_smoothing": 0.05,
+  "dropout": 0.25,
+  "gradual_unfreeze": true,
+  "early_stopping_patience": 5,
+  "best_val_acc": 0.9727272727272728,
+  "device_used": "cpu",
+  "train_seconds": 1512.0249218940735
+}

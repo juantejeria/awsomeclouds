@@ -1,0 +1,19 @@
+[
+  {
+    "timestamp": "2026-04-01T16:00:57.646274",
+    "file_name": "Desfile_VisualC_recortado.mp4",
+    "file_type": "video",
+    "result": "(sin detecciones)",
+    "confidence": 0.0,
+    "decision": "unknown",
+    "threshold": 0.7,
+    "stride": 10,
+    "max_frames": 150,
+    "yolo_detection": true,
+    "multi_animal": true,
+    "animals_tracked": 0,
+    "frames_with_detections": 1,
+    "frames_without_detections": 329,
+    "total_frames_extracted": 330
+  }
+]

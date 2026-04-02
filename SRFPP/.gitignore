@@ -3,10 +3,35 @@ __pycache__/
 *.pyc
 .DS_Store
 
+# Data: imagenes, videos, datasets (pesado, no subir)
 data/
-artifacts/
+diagnostico_visual/
+
+# Videos en cualquier ubicacion
 *.mp4
 *.mov
 *.avi
 *.mkv
+*.MOV
 
+# Artifacts: ignorar todo por defecto
+artifacts/
+
+# PERO incluir los resultados de entrenamiento (modelo, config, centroides)
+!artifacts/
+!artifacts/*/
+!artifacts/*/model.pt
+!artifacts/*/classes.json
+!artifacts/*/config.json
+!artifacts/*/centroids.npz
+!artifacts/*/training_progress.json
+
+# Excluir reportes e imagenes de artifacts
+artifacts/*/report_images/
+artifacts/*/training_report.html
+artifacts/*/training_report_data.json
+
+# Scripts temporales y modelos auxiliares
+artifacts/face_filter/
+cattle_face_detection/
+*.zip

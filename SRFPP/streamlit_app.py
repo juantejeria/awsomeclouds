@@ -300,6 +300,13 @@ from src.training_status import append_training_history, load_training_history, 
 from src.io_utils import list_establecimientos as list_trained_establecimientos
 
 
+@st.cache_resource
+def _cached_load_artifacts(artifacts_dir: str, model_mtime: float):
+    """Carga artefactos del modelo con caché (se recarga solo si el modelo cambia en disco)."""
+    from src.infer import load_artifacts
+    return load_artifacts(artifacts_dir)
+
+
 def get_selected_establecimiento(establecimientos: list[str], default_key: str) -> str | None:
     """Obtiene el establecimiento seleccionado, usando el cache si existe."""
     if not establecimientos:
@@ -794,6 +801,18 @@ def render_upload_files(
             max_frames = 50
             filter_faces = False
             require_features = None
+            crop_uploads_to_face = True  # default on
+
+            # Opción de recorte facial para todas las subidas
+            st.markdown("**Recorte facial:**")
+            crop_uploads_to_face = st.checkbox(
+                "Recortar al rostro/cuerpo detectado antes de guardar",
+                value=True,
+                key=f"crop_face_check_{key_prefix}",
+                help="Detecta el rostro (o cuerpo) de la vaca en cada imagen/frame y "
+                     "guarda solo la región recortada. Recomendado para mejorar el "
+                     "entrenamiento de reconocimiento facial.",
+            )
 
             is_any_video = False
             for f in uploaded_files:
@@ -857,6 +876,12 @@ def render_upload_files(
                             
                             dest_path = animal_dir / file_name
                             save_uploaded_file(uploaded_file, dest_path)
+
+                            # Crop to face if enabled
+                            if crop_uploads_to_face:
+                                from src.dataset_manager import crop_image_to_face
+                                crop_image_to_face(dest_path)
+
                             saved_count += 1
                         else:  # Videos
                             dest_path = animal_dir / file_name
@@ -870,6 +895,7 @@ def render_upload_files(
                                     max_frames=max_frames,
                                     filter_faces=filter_faces,
                                     require_features=require_features,
+                                    crop_to_face=crop_uploads_to_face,
                                 )
                                 saved_count += frames_extracted
                             else:
@@ -1106,6 +1132,23 @@ def render_training(selected_estab: str, show_nav: bool = True):
                 "y eliminar frames similares. Esto puede tardar varios minutos dependiendo del tamaño del dataset."
             )
     
+    # Sección de Recorte Facial
+    with st.expander("Recorte Facial para Entrenamiento", expanded=False):
+        crop_to_face = st.checkbox(
+            "Recortar imágenes al rostro/cuerpo detectado antes de entrenar",
+            value=True,
+            help="Usa el modelo de detección facial de vacas para recortar cada imagen "
+                 "del dataset al rostro detectado (o al cuerpo si no se detecta rostro). "
+                 "Esto asegura que el modelo de reconocimiento se entrene con las mismas "
+                 "regiones que se usan durante la predicción, mejorando la precisión."
+        )
+        if crop_to_face:
+            st.info(
+                "Antes de entrenar, cada imagen será procesada con el detector facial de vacas. "
+                "Las imágenes serán recortadas al **rostro** (si se detecta) o al **cuerpo** "
+                "(como fallback). Esto puede tomar unos minutos la primera vez."
+            )
+
     params_snapshot = {
         "epochs": int(epochs),
         "batch_size": int(batch_size),
@@ -1114,6 +1157,7 @@ def render_training(selected_estab: str, show_nav: bool = True):
         "val_frac": float(val_frac),
         "balance_dataset": bool(balance_dataset),
         "balance_similarity_threshold": float(balance_similarity_threshold),
+        "crop_to_face": bool(crop_to_face),
     }
     last_trained_dataset_key = f"last_trained_dataset_{selected_estab}"
     last_trained_params_key = f"last_trained_params_{selected_estab}"
@@ -1144,6 +1188,7 @@ def render_training(selected_estab: str, show_nav: bool = True):
                         yolo_require_features=None,
                         balance_dataset=balance_dataset,
                         balance_similarity_threshold=balance_similarity_threshold,
+                        crop_to_face=crop_to_face,
                     )
                     
                     st.session_state["training_process"] = process
@@ -1577,6 +1622,86 @@ def render_unknown_actions(
                 st.error(f"Error al crear animal: {e}")
 
 
+def _render_single_track_result(tr):
+    """Render identification metrics and top frames for a single TrackResult."""
+    pred = tr.prediction
+
+    # Row: identification stats
+    n_id_cols = 5 if tr.avg_cosine_similarity > 0 else 4
+    id_cols = st.columns(n_id_cols)
+    with id_cols[0]:
+        st.metric(
+            f"Frames {tr.winning_label}",
+            f"{tr.winning_count}/{len(tr.frame_detections)}",
+        )
+    with id_cols[1]:
+        st.metric("Concordancia", f"{tr.agreement_ratio:.0%}")
+    with id_cols[2]:
+        st.metric(
+            f"Conf. top {len(tr.top_detections)}",
+            f"{tr.winning_class_avg_conf:.1%}",
+        )
+    with id_cols[3]:
+        top_face_count = sum(1 for d in tr.top_detections if d.is_face_detection)
+        st.metric("Top frames con rostro", f"{top_face_count}/{len(tr.top_detections)}")
+    if tr.avg_cosine_similarity > 0:
+        with id_cols[4]:
+            st.metric("Similitud", f"{tr.avg_cosine_similarity:.3f}")
+
+    sim_txt = (
+        f" | similitud: {tr.avg_cosine_similarity:.3f}"
+        if tr.avg_cosine_similarity > 0 else ""
+    )
+    if pred.decision == "unknown":
+        st.error(
+            f"**Resultado: DESCONOCIDA** (confianza top-{len(tr.top_detections)}: "
+            f"{pred.confidence:.1%}{sim_txt})"
+        )
+        st.caption(
+            f"Mejor coincidencia: **{pred.label}** | "
+            f"{tr.winning_count} de {len(tr.frame_detections)} frames votaron por este individuo"
+        )
+    else:
+        st.success(
+            f"**Resultado: {pred.label}** (confianza top-{len(tr.top_detections)}: "
+            f"{pred.confidence:.1%}{sim_txt})"
+        )
+        st.caption(
+            f"{tr.winning_count} de {len(tr.frame_detections)} frames votaron por este individuo | "
+            f"Concordancia: {tr.agreement_ratio:.0%}"
+        )
+
+    # Top frames expander
+    if tr.top_detections:
+        with st.expander(
+            f"Mejores {len(tr.top_detections)} frames de {tr.winning_label} "
+            f"(de {tr.winning_count} frames totales)",
+            expanded=False,
+        ):
+            for det in tr.top_detections:
+                col_fr, col_crop, col_info = st.columns([2, 1, 1])
+                with col_fr:
+                    st.image(
+                        det.frame_rgb,
+                        caption=f"Frame #{det.frame_idx}",
+                        use_container_width=True,
+                    )
+                with col_crop:
+                    st.image(
+                        det.crop_rgb,
+                        caption="Recorte",
+                        use_container_width=True,
+                    )
+                with col_info:
+                    st.markdown(f"**Individuo:** {det.label}")
+                    st.markdown(f"**Confianza:** {det.recognition_confidence:.1%}")
+                    if det.cosine_similarity > 0:
+                        st.markdown(f"**Similitud:** {det.cosine_similarity:.3f}")
+                    det_label = "Rostro" if det.is_face_detection else "Cuerpo"
+                    st.markdown(f"**Deteccion:** {det_label} ({det.yolo_confidence:.0%})")
+                st.markdown("---")
+
+
 def render_new_prediction(
     selected_estab: str | None,
     trained_estabs: list[str],
@@ -1595,6 +1720,27 @@ def render_new_prediction(
         st.write("**Configuración de video:**")
         stride = st.number_input("Stride (cada N frames)", min_value=1, max_value=60, value=10, step=1)
         max_frames = st.number_input("Máximo frames a evaluar", min_value=10, max_value=600, value=150, step=10)
+        use_yolo_detection = st.checkbox(
+            "Detección facial con YOLO (recomendado)",
+            value=True,
+            help="Usa un modelo YOLO especializado para detectar el rostro de la vaca en cada frame "
+                 "y recorta esa región antes de identificar. Si no detecta rostro, cae a detección de "
+                 "cuerpo completo. Mejora significativamente la precisión en video.",
+        )
+        if use_yolo_detection:
+            multi_animal = st.checkbox(
+                "Rastreo multi-animal",
+                value=False,
+                help="Rastrea y reconoce multiples animales en el video simultaneamente. "
+                     "Evalua el video completo para contar todos los animales.",
+            )
+            if multi_animal:
+                st.caption(
+                    "El modo multi-animal evalua el video completo (sin limite de frames) "
+                    "para asegurar que se detecten todos los animales."
+                )
+        else:
+            multi_animal = False
 
         capture_method_pred = st.radio(
             "Método de captura",
@@ -1656,9 +1802,15 @@ def render_new_prediction(
                 else:
                     st.image(img, caption=caption_text, use_container_width=True)
             else:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded.name).suffix) as tmp:
-                    tmp.write(uploaded.read())
-                    tmp_path = tmp.name
+                # Guardar video en tmp una sola vez y cachear la ruta en session_state
+                # (Streamlit re-ejecuta el script al cambiar widgets y uploaded.read() se consume)
+                cache_key = f"_tmp_video_{id(uploaded)}"
+                if cache_key not in st.session_state:
+                    uploaded.seek(0)
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded.name).suffix) as tmp:
+                        tmp.write(uploaded.read())
+                        st.session_state[cache_key] = tmp.name
+                tmp_path = st.session_state[cache_key]
                 st.video(tmp_path)
 
             # Seleccionar dataset para validar después de cargar el archivo
@@ -1675,11 +1827,14 @@ def render_new_prediction(
                 st.info("Selecciona un dataset para continuar con la validación.")
                 return
 
-            # Cargar modelo según dataset seleccionado
+            # Cargar modelo según dataset seleccionado (cacheado en memoria)
             artifacts_dir = Path("artifacts") / selected_dataset
             try:
-                from src.infer import load_artifacts
-                model, classes, tfm, dev = load_artifacts(artifacts_dir)
+                model_pt = artifacts_dir / "model.pt"
+                model_mtime = model_pt.stat().st_mtime if model_pt.exists() else 0.0
+                model, classes, tfm, dev, centroids = _cached_load_artifacts(
+                    str(artifacts_dir), model_mtime
+                )
             except Exception as e:
                 st.error(f"Error al cargar modelo de '{selected_dataset}': {e}")
                 return
@@ -1689,10 +1844,15 @@ def render_new_prediction(
                     from src.infer import predict_image
 
                     with st.spinner("Procesando imagen..."):
-                        pred = predict_image(model, classes, tfm, dev, img, threshold=float(threshold))
+                        pred = predict_image(
+                            model, classes, tfm, dev, img,
+                            threshold=float(threshold),
+                            centroids=centroids,
+                        )
 
                     if pred.decision == "unknown":
-                        st.error(f"**Resultado: DESCONOCIDA** (confianza: {pred.confidence:.3f})")
+                        sim_info = f" | similitud: {pred.cosine_similarity:.3f}" if pred.cosine_similarity > 0 else ""
+                        st.error(f"**Resultado: DESCONOCIDA** (confianza: {pred.confidence:.3f}{sim_info})")
                         st.caption(f"Mejor coincidencia: {pred.label}")
                         render_unknown_actions(
                             selected_dataset,
@@ -1703,7 +1863,8 @@ def render_new_prediction(
                             default_max_frames=int(max_frames),
                         )
                     else:
-                        st.success(f"**Resultado: {pred.label}** (confianza: {pred.confidence:.3f})")
+                        sim_info = f" | similitud: {pred.cosine_similarity:.3f}" if pred.cosine_similarity > 0 else ""
+                        st.success(f"**Resultado: {pred.label}** (confianza: {pred.confidence:.3f}{sim_info})")
 
                     # Guardar en historial
                     prediction_data = {
@@ -1722,33 +1883,292 @@ def render_new_prediction(
 
             else:
                 try:
-                    from src.infer import predict_video
+                    if use_yolo_detection and multi_animal:
+                        # --- Multi-animal pipeline ---
+                        from src.infer import predict_video_multi_animal
+                        from src.video_report import generate_video_report, generate_multi_video_report
 
-                    with st.spinner("Procesando video..."):
-                        pred = predict_video(
-                            model,
-                            classes,
-                            tfm,
-                            dev,
-                            tmp_path,
+                        progress_bar = st.progress(0.0)
+                        status_text = st.empty()
+
+                        def _update_progress(current, total):
+                            progress_bar.progress(current / total)
+                            status_text.text(f"Analizando frame {current}/{total}...")
+
+                        with st.spinner("Detectando y rastreando animales..."):
+                            multi_result = predict_video_multi_animal(
+                                model,
+                                classes,
+                                tfm,
+                                dev,
+                                tmp_path,
+                                threshold=float(threshold),
+                                stride=int(stride),
+                                max_frames=None,  # Process full video for accurate counting
+                                progress_callback=_update_progress,
+                                centroids=centroids,
+                            )
+
+                        progress_bar.empty()
+                        status_text.empty()
+
+                        # --- Global stats row ---
+                        st.markdown("---")
+                        g_cols = st.columns(4)
+                        with g_cols[0]:
+                            st.metric("Frames extraidos", multi_result.total_frames_extracted)
+                        with g_cols[1]:
+                            st.metric("Frames con deteccion", multi_result.frames_with_detections)
+                        with g_cols[2]:
+                            st.metric("Sin deteccion", multi_result.frames_without_detections)
+                        with g_cols[3]:
+                            st.metric("Animales rastreados", len(multi_result.tracks))
+
+                        if multi_result.noise_tracks_discarded > 0:
+                            st.caption(
+                                f"{multi_result.noise_tracks_discarded} rastreo(s) descartado(s) por ser muy corto(s)."
+                            )
+
+                        if len(multi_result.tracks) == 0:
+                            st.warning("No se identificaron animales con suficientes frames de rastreo.")
+                            pred = type("Pred", (), {"label": "(sin detecciones)", "confidence": 0.0, "decision": "unknown"})()
+                        elif len(multi_result.tracks) == 1:
+                            # Single track — render same as current single-animal view
+                            tr = multi_result.tracks[0]
+                            pred = tr.prediction
+                            _render_single_track_result(tr)
+
+                            report_html = generate_multi_video_report(
+                                multi_result,
+                                video_filename=file_name,
+                                dataset_name=get_establecimiento_display_name(selected_dataset),
+                                threshold=float(threshold),
+                            )
+                            st.download_button(
+                                label="Descargar reporte completo (HTML)",
+                                data=report_html,
+                                file_name=f"reporte_multi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html",
+                                mime="text/html",
+                                use_container_width=True,
+                            )
+
+                            if pred.decision == "unknown":
+                                render_unknown_actions(
+                                    selected_dataset,
+                                    uploaded,
+                                    file_name,
+                                    is_video=True,
+                                    default_stride=int(stride),
+                                    default_max_frames=int(max_frames),
+                                )
+                        else:
+                            # Multiple tracks — tabs per animal
+                            st.markdown(f"### Se identificaron **{len(multi_result.tracks)}** animales")
+                            tab_labels = [
+                                f"Animal {i+1}: {tr.winning_label}"
+                                for i, tr in enumerate(multi_result.tracks)
+                            ]
+                            tabs = st.tabs(tab_labels)
+                            for tab, tr in zip(tabs, multi_result.tracks):
+                                with tab:
+                                    _render_single_track_result(tr)
+
+                            pred = multi_result.tracks[0].prediction
+
+                            report_html = generate_multi_video_report(
+                                multi_result,
+                                video_filename=file_name,
+                                dataset_name=get_establecimiento_display_name(selected_dataset),
+                                threshold=float(threshold),
+                            )
+                            st.download_button(
+                                label="Descargar reporte completo (HTML)",
+                                data=report_html,
+                                file_name=f"reporte_multi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html",
+                                mime="text/html",
+                                use_container_width=True,
+                            )
+
+                    elif use_yolo_detection:
+                        # --- Single-animal YOLO pipeline (existing) ---
+                        from src.infer import predict_video_with_detection
+                        from src.video_report import generate_video_report
+
+                        progress_bar = st.progress(0.0)
+                        status_text = st.empty()
+
+                        def _update_progress(current, total):
+                            progress_bar.progress(current / total)
+                            status_text.text(f"Analizando frame {current}/{total}...")
+
+                        with st.spinner("Detectando animales y analizando video..."):
+                            video_result = predict_video_with_detection(
+                                model,
+                                classes,
+                                tfm,
+                                dev,
+                                tmp_path,
+                                threshold=float(threshold),
+                                stride=int(stride),
+                                max_frames=int(max_frames),
+                                progress_callback=_update_progress,
+                                centroids=centroids,
+                            )
+
+                        progress_bar.empty()
+                        status_text.empty()
+                        pred = video_result.prediction
+
+                        # --- Resumen de detección ---
+                        st.markdown("---")
+
+                        # Row 1: detection stats
+                        det_cols = st.columns(4)
+                        with det_cols[0]:
+                            st.metric("Frames extraídos", video_result.total_frames_extracted)
+                        with det_cols[1]:
+                            st.metric("Rostros detectados", video_result.frames_with_face)
+                        with det_cols[2]:
+                            st.metric("Cuerpo (sin rostro)", video_result.frames_with_body_only)
+                        with det_cols[3]:
+                            st.metric("Sin detección", video_result.frames_without_detections)
+
+                        # Row 2: identification stats
+                        n_id_cols = 5 if video_result.avg_cosine_similarity > 0 else 4
+                        id_cols = st.columns(n_id_cols)
+                        with id_cols[0]:
+                            st.metric(
+                                f"Frames {video_result.winning_label}",
+                                f"{video_result.winning_count}/{len(video_result.frame_detections)}",
+                            )
+                        with id_cols[1]:
+                            st.metric("Concordancia", f"{video_result.agreement_ratio:.0%}")
+                        with id_cols[2]:
+                            st.metric(
+                                f"Conf. top {len(video_result.top_detections)}",
+                                f"{video_result.winning_class_avg_conf:.1%}",
+                            )
+                        with id_cols[3]:
+                            # Show how many of the top frames used face detection
+                            top_face_count = sum(1 for d in video_result.top_detections if d.is_face_detection)
+                            st.metric("Top frames con rostro", f"{top_face_count}/{len(video_result.top_detections)}")
+                        if video_result.avg_cosine_similarity > 0:
+                            with id_cols[4]:
+                                st.metric("Similitud", f"{video_result.avg_cosine_similarity:.3f}")
+
+                        sim_txt = (
+                            f" | similitud: {video_result.avg_cosine_similarity:.3f}"
+                            if video_result.avg_cosine_similarity > 0 else ""
+                        )
+                        if pred.decision == "unknown":
+                            st.error(
+                                f"**Resultado: DESCONOCIDA** (confianza top-{len(video_result.top_detections)}: "
+                                f"{pred.confidence:.1%}{sim_txt})"
+                            )
+                            st.caption(
+                                f"Mejor coincidencia: **{pred.label}** | "
+                                f"{video_result.winning_count} de {video_result.frames_with_detections} frames votaron por este individuo"
+                            )
+                            if video_result.avg_cosine_similarity > 0:
+                                st.info(
+                                    f"La similitud coseno ({video_result.avg_cosine_similarity:.3f}) "
+                                    f"está por debajo del umbral, indicando que este animal "
+                                    f"probablemente no está en el dataset de entrenamiento."
+                                )
+                        else:
+                            st.success(
+                                f"**Resultado: {pred.label}** (confianza top-{len(video_result.top_detections)}: "
+                                f"{pred.confidence:.1%}{sim_txt})"
+                            )
+                            st.caption(
+                                f"{video_result.winning_count} de {video_result.frames_with_detections} frames votaron por este individuo | "
+                                f"Concordancia: {video_result.agreement_ratio:.0%}"
+                            )
+
+                        # --- Mostrar top frames del individuo ganador ---
+                        if video_result.top_detections:
+                            with st.expander(
+                                f"Mejores {len(video_result.top_detections)} frames de {video_result.winning_label} "
+                                f"(de {video_result.winning_count} frames totales)",
+                                expanded=False,
+                            ):
+                                for det in video_result.top_detections:
+                                    col_fr, col_crop, col_info = st.columns([2, 1, 1])
+                                    with col_fr:
+                                        st.image(
+                                            det.frame_rgb,
+                                            caption=f"Frame #{det.frame_idx}",
+                                            use_container_width=True,
+                                        )
+                                    with col_crop:
+                                        st.image(
+                                            det.crop_rgb,
+                                            caption="Recorte",
+                                            use_container_width=True,
+                                        )
+                                    with col_info:
+                                        st.markdown(f"**Individuo:** {det.label}")
+                                        st.markdown(f"**Confianza:** {det.recognition_confidence:.1%}")
+                                        if det.cosine_similarity > 0:
+                                            st.markdown(f"**Similitud:** {det.cosine_similarity:.3f}")
+                                        det_label = "Rostro" if det.is_face_detection else "Cuerpo"
+                                        st.markdown(f"**Detección:** {det_label} ({det.yolo_confidence:.0%})")
+                                    st.markdown("---")
+
+                        # --- Generar y ofrecer reporte descargable ---
+                        report_html = generate_video_report(
+                            video_result,
+                            video_filename=file_name,
+                            dataset_name=get_establecimiento_display_name(selected_dataset),
                             threshold=float(threshold),
-                            stride=int(stride),
-                            max_frames=int(max_frames),
+                        )
+                        st.download_button(
+                            label="Descargar reporte completo (HTML)",
+                            data=report_html,
+                            file_name=f"reporte_video_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html",
+                            mime="text/html",
+                            use_container_width=True,
                         )
 
-                    if pred.decision == "unknown":
-                        st.error(f"**Resultado: DESCONOCIDA** (confianza promedio: {pred.confidence:.3f})")
-                        st.caption(f"Mejor coincidencia promedio: {pred.label}")
-                        render_unknown_actions(
-                            selected_dataset,
-                            uploaded,
-                            file_name,
-                            is_video=True,
-                            default_stride=int(stride),
-                            default_max_frames=int(max_frames),
-                        )
+                        if pred.decision == "unknown":
+                            render_unknown_actions(
+                                selected_dataset,
+                                uploaded,
+                                file_name,
+                                is_video=True,
+                                default_stride=int(stride),
+                                default_max_frames=int(max_frames),
+                            )
+
                     else:
-                        st.success(f"**Resultado: {pred.label}** (confianza promedio: {pred.confidence:.3f})")
+                        # --- Pipeline original (sin YOLO) ---
+                        from src.infer import predict_video
+
+                        with st.spinner("Procesando video..."):
+                            pred = predict_video(
+                                model,
+                                classes,
+                                tfm,
+                                dev,
+                                tmp_path,
+                                threshold=float(threshold),
+                                stride=int(stride),
+                                max_frames=int(max_frames),
+                            )
+
+                        if pred.decision == "unknown":
+                            st.error(f"**Resultado: DESCONOCIDA** (confianza promedio: {pred.confidence:.3f})")
+                            st.caption(f"Mejor coincidencia promedio: {pred.label}")
+                            render_unknown_actions(
+                                selected_dataset,
+                                uploaded,
+                                file_name,
+                                is_video=True,
+                                default_stride=int(stride),
+                                default_max_frames=int(max_frames),
+                            )
+                        else:
+                            st.success(f"**Resultado: {pred.label}** (confianza promedio: {pred.confidence:.3f})")
 
                     # Guardar en historial
                     prediction_data = {
@@ -1761,11 +2181,24 @@ def render_new_prediction(
                         "threshold": threshold,
                         "stride": stride,
                         "max_frames": max_frames,
+                        "yolo_detection": use_yolo_detection,
                     }
+                    if use_yolo_detection and multi_animal:
+                        prediction_data["multi_animal"] = True
+                        prediction_data["animals_tracked"] = len(multi_result.tracks)
+                        prediction_data["frames_with_detections"] = multi_result.frames_with_detections
+                        prediction_data["frames_without_detections"] = multi_result.frames_without_detections
+                        prediction_data["total_frames_extracted"] = multi_result.total_frames_extracted
+                    elif use_yolo_detection:
+                        prediction_data["frames_with_detections"] = video_result.frames_with_detections
+                        prediction_data["frames_without_detections"] = video_result.frames_without_detections
+                        prediction_data["total_frames_extracted"] = video_result.total_frames_extracted
                     save_prediction_history(selected_dataset, prediction_data)
 
                 except Exception as e:
                     st.error(f"Error al procesar video: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
 
 
 def render_prediction_history_tab(selected_estab: str):

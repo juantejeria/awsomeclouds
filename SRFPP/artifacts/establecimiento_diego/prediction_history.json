@@ -1,0 +1,29 @@
+[
+  {
+    "timestamp": "2026-01-27T09:06:51.390773",
+    "file_name": "camera_20260127_090650.jpg",
+    "file_type": "imagen",
+    "result": "diego",
+    "confidence": 0.7236489653587341,
+    "decision": "known",
+    "threshold": 0.7
+  },
+  {
+    "timestamp": "2026-01-27T09:06:34.210037",
+    "file_name": "camera_20260127_090633.jpg",
+    "file_type": "imagen",
+    "result": "diego",
+    "confidence": 0.7236489653587341,
+    "decision": "known",
+    "threshold": 0.7
+  },
+  {
+    "timestamp": "2026-01-19T23:33:10.344466",
+    "file_name": "camera_20260119_233310.jpg",
+    "file_type": "imagen",
+    "result": "diego",
+    "confidence": 0.6508303880691528,
+    "decision": "unknown",
+    "threshold": 0.7
+  }
+]

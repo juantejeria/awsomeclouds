@@ -1,0 +1,13 @@
+{
+  "status": "completed",
+  "current_epoch": 15,
+  "total_epochs": 15,
+  "progress_percent": 100.0,
+  "train_loss": 0.8809762988877816,
+  "train_acc": 0.8006230529595015,
+  "val_loss": 0.9132849114176668,
+  "val_acc": 0.7654320987654321,
+  "best_val_acc": 0.7654320987654321,
+  "elapsed_time": 547.605386018753,
+  "display_name": "terneros 21/01/2026"
+}

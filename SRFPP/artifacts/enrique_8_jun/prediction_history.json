@@ -1,0 +1,47 @@
+[
+  {
+    "timestamp": "2026-01-21T09:06:08.118385",
+    "file_name": "Screenshot 2026-01-13 at 14.43.05.png",
+    "file_type": "imagen",
+    "result": "vaca357",
+    "confidence": 0.5499128103256226,
+    "decision": "unknown",
+    "threshold": 0.7
+  },
+  {
+    "timestamp": "2026-01-19T23:33:24.407209",
+    "file_name": "camera_20260119_233324.jpg",
+    "file_type": "imagen",
+    "result": "vaca357",
+    "confidence": 0.5270291566848755,
+    "decision": "unknown",
+    "threshold": 0.7
+  },
+  {
+    "timestamp": "2026-01-19T23:17:11.376286",
+    "file_name": "camera_20260119_231711.jpg",
+    "file_type": "imagen",
+    "result": "vaca357",
+    "confidence": 0.520796537399292,
+    "decision": "unknown",
+    "threshold": 0.7
+  },
+  {
+    "timestamp": "2026-01-19T23:09:27.504220",
+    "file_name": "camera_20260119_230927.jpg",
+    "file_type": "imagen",
+    "result": "vaca357",
+    "confidence": 0.5188133120536804,
+    "decision": "unknown",
+    "threshold": 0.7
+  },
+  {
+    "timestamp": "2026-01-19T23:09:21.159994",
+    "file_name": "camera_20260119_230920.jpg",
+    "file_type": "imagen",
+    "result": "vaca357",
+    "confidence": 0.519932746887207,
+    "decision": "unknown",
+    "threshold": 0.7
+  }
+]

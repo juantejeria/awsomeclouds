@@ -1,0 +1,13 @@
+{
+  "status": "completed",
+  "current_epoch": 10,
+  "total_epochs": 10,
+  "progress_percent": 100.0,
+  "train_loss": 0.39330945909023285,
+  "train_acc": 0.9479166666666666,
+  "val_loss": 0.26718204220136005,
+  "val_acc": 1.0,
+  "best_val_acc": 1.0,
+  "elapsed_time": 137.0258150100708,
+  "display_name": "Videos Mangas"
+}

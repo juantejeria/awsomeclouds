@@ -1,0 +1,26 @@
+[
+  {
+    "display_name": "terneros 21/01/2026",
+    "best_val_acc": 0.8571428571428571,
+    "val_acc": 0.8571428571428571,
+    "train_acc": 1.0,
+    "val_loss": 0.36334240436553955,
+    "train_loss": 0.012480273414107542,
+    "total_epochs": 20,
+    "elapsed_time": 437.9941689968109,
+    "completed_at": "2026-01-26T17:34:51.899183"
+  },
+  {
+    "display_name": "terneros 21/01/2026",
+    "best_val_acc": 1.0,
+    "val_acc": 1.0,
+    "train_acc": 0.9883720930232558,
+    "val_loss": 0.05462988398291848,
+    "train_loss": 0.04202835331129473,
+    "total_epochs": 20,
+    "elapsed_time": 650.1136131286621,
+    "completed_at": "2026-01-26T16:39:22.662823",
+    "device": "Celular Enrique",
+    "otros": ""
+  }
+]

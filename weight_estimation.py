@@ -4,7 +4,7 @@ Estimación de peso de ganado a partir de imágenes usando visión por computado
 Clase principal: WeightEstimator
   - Detecta el cuerpo del animal y sus keypoints con YOLO (cow.pt)
   - Detecta ojos con YOLO de segmentación (eye.pt) para escala por distancia inter-ocular
-  - Detecta postes rojos (sticker.pt / color) para escala por altura conocida (122 cm)
+  - Detecta postes rojos (sticker.pt / color) para escala por altura conocida (50 cm)
   - Calcula dist1 (Body Length: pinbone → shoulderbone) y dist2 (Girth Vertical)
   - Aplica fórmula de Schaeffer: weight_kg = (BL × GV² × lb) / 300
   - Corrige por raza, categoría y edad (breed_coefficients.py)
@@ -17,6 +17,8 @@ import math
 from ultralytics import YOLO
 import os
 import time
+
+import base64
 
 try:
     from depth_estimation import DepthEstimator
@@ -34,7 +36,7 @@ except ImportError:
 from breed_coefficients import get_weight_multiplier
 
 # HSV del rojo de referencia (rojo tiene dos rangos: 0-10 y 170-180)
-# Rangos más permisivos para detectar rojo puro (bandas rojas de 122cm)
+# Rangos más permisivos para detectar rojo puro (bandas rojas de 50cm)
 RED_HSV_LOWER1 = np.array([0, 100, 100])    # Rojo bajo (0-10) - más permisivo
 RED_HSV_UPPER1 = np.array([10, 255, 255])
 RED_HSV_LOWER2 = np.array([170, 100, 100])  # Rojo alto (170-180) - más permisivo
@@ -138,7 +140,7 @@ class WeightEstimator:
             print(f"[MEASURE_POST] bbox={bbox} height_px={height_px}")
         return height_px if height_px > 0 else None
     
-    def _select_post_for_scale(self, postes, image, animal_bbox=None, band_tolerance=0.2):
+    def _select_post_for_scale(self, postes, image, animal_bbox=None, band_tolerance=0.5):
         """
         Selecciona el poste para escala: el más grande y más cercano al animal.
         Considera TODOS los postes detectados en la imagen completa, no solo los que están
@@ -157,7 +159,8 @@ class WeightEstimator:
             ax1, ay1, ax2, ay2 = animal_bbox
             animal_height = max(1, ay2 - ay1)
             band_top = ay1 - int(animal_height * band_tolerance)
-            band_bottom = ay2 + int(animal_height * band_tolerance)
+            img_h = image.shape[0]
+            band_bottom = img_h - 1  # No limitar por abajo: los postes están a nivel del suelo
             animal_center = ((ax1 + ax2) / 2, (ay1 + ay2) / 2)
         else:
             band_top = None
@@ -177,7 +180,7 @@ class WeightEstimator:
             # Verificar si está dentro de la banda vertical (preferencia, no requisito)
             in_band = True
             if band_top is not None and band_bottom is not None:
-                in_band = y1 >= band_top and y2 <= band_bottom
+                in_band = y1 >= band_top  # Solo verificar límite superior (excluir cielo/fondo)
             
             poste_data = {
                 **p, 
@@ -332,51 +335,101 @@ class WeightEstimator:
             _log(f"girth_depth: ERROR {e}")
             return None
 
-    def estimate_weight(self, img_path, visualize=True, debug=False, debug_context="", return_eye_coords=False, return_keypoint_coords=False, roi_offset=(0, 0), scale_method='both', breed="desconocido", category="desconocido", age_range="desconocido", override_cm_per_px=None, yolo_imgsz=None):
+    def _get_depth_scale_correction(self, image_bgr, animal_bbox, poste_candidates, _log):
         """
-        Estima el peso del ganado en una imagen
-        
-        Args:
-            img_path: Ruta a la imagen del ganado
-            visualize: Si True, retorna también la imagen procesada con visualizaciones
-            debug: Si True, imprime logs de debug
-            debug_context: Contexto adicional para los logs
-            return_eye_coords: Si True, retorna también las coordenadas de los ojos detectados
-            return_keypoint_coords: Si True, retorna también las coordenadas de los keypoints usados para dist1 y dist2
-            scale_method: Método de escala a usar ('both', 'eyes', 'poste')
-                - 'both': Busca ojos primero, luego poste rojo como fallback
-                - 'eyes': Solo busca ojos
-                - 'poste': Solo busca poste rojo (122cm)
-        
+        Usa Depth Anything V2 para estimar la profundidad relativa entre la vaca
+        y los postes de referencia, retornando un factor de corrección para la escala cm/px.
+
+        La escala base (cm/px) asume que vaca y poste están a la misma distancia de la cámara.
+        Si la vaca está más cerca o más lejos, la escala necesita ajuste proporcional.
+
+        Depth Anything V2 produce valores de profundidad relativa (disparity-like):
+        - Valores más altos = más cerca de la cámara
+        - correction = depth_post / depth_cow
+          - Si cow más cerca (depth_cow > depth_post): ratio < 1 → escala se reduce
+          - Si cow más lejos (depth_cow < depth_post): ratio > 1 → escala se aumenta
+
         Returns:
-            Si visualize=True y return_eye_coords=False y return_keypoint_coords=False: (imagen_procesada, peso_estimado)
-            Si visualize=True y return_eye_coords=True: (imagen_procesada, peso_estimado, eye_coords, keypoint_coords)
-            Si visualize=False y return_eye_coords=True: (peso_estimado, eye_coords, keypoint_coords) o (None, [], [])
-            Si visualize=False y return_eye_coords=False: peso_estimado o None si no se puede calcular
+            float: factor de corrección (1.0 si no se puede calcular)
         """
-        def _log(msg: str):
-            if debug:
-                prefix = "[WEIGHT]"
-                ctx = f" {debug_context}".strip()
-                print(f"{prefix}{(' ' + ctx) if ctx else ''} {msg}")
+        if self.depth_pipe is None:
+            return 1.0
 
-        t0 = time.time()
+        if not animal_bbox or not poste_candidates:
+            return 1.0
 
-        # Leer imagen
+        try:
+            from PIL import Image as PILImage
+
+            image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+            pil_image = PILImage.fromarray(image_rgb)
+
+            depth_result = self.depth_pipe(pil_image)
+            depth_map = np.array(depth_result['depth'], dtype=np.float32)
+
+            h, w = depth_map.shape[:2]
+            _log(f"depth_correction: depth_map shape={depth_map.shape} min={depth_map.min():.2f} max={depth_map.max():.2f}")
+
+            # Muestrear profundidad en el centro de la vaca (parche 5x5)
+            ax1, ay1, ax2, ay2 = map(int, animal_bbox)
+            cow_cx = max(2, min((ax1 + ax2) // 2, w - 3))
+            cow_cy = max(2, min((ay1 + ay2) // 2, h - 3))
+            cow_depth = float(np.mean(depth_map[cow_cy - 2:cow_cy + 3, cow_cx - 2:cow_cx + 3]))
+
+            _log(f"depth_correction: cow center=({cow_cx},{cow_cy}) depth_value={cow_depth:.4f}")
+
+            # Muestrear profundidad en cada poste candidato
+            post_depths = []
+            for idx, p in enumerate(poste_candidates):
+                px1, py1, px2, py2 = map(int, p['bbox'])
+                pcx = max(2, min((px1 + px2) // 2, w - 3))
+                pcy = max(2, min((py1 + py2) // 2, h - 3))
+                pd = float(np.mean(depth_map[pcy - 2:pcy + 3, pcx - 2:pcx + 3]))
+                if pd > 0:
+                    post_depths.append(pd)
+                    _log(f"depth_correction: post[{idx}] center=({pcx},{pcy}) depth_value={pd:.4f}")
+
+            if not post_depths or cow_depth <= 0:
+                _log(f"depth_correction: skipped (cow_depth={cow_depth:.4f} valid_posts={len(post_depths)})")
+                return 1.0
+
+            avg_post_depth = sum(post_depths) / len(post_depths)
+
+            # Factor de corrección: depth_post / depth_cow
+            # (Depth Anything V2 produce inverse depth: mayor valor = más cerca)
+            correction = avg_post_depth / cow_depth
+
+            # Limitar a rango razonable (0.5x a 2.0x) para evitar valores extremos
+            correction_clamped = max(0.5, min(2.0, correction))
+
+            _log(f"depth_correction: avg_post_depth={avg_post_depth:.4f} cow_depth={cow_depth:.4f} "
+                 f"raw_ratio={correction:.4f} clamped={correction_clamped:.4f}")
+
+            if abs(correction - correction_clamped) > 0.01:
+                _log(f"depth_correction: WARNING ratio clamped from {correction:.4f} to {correction_clamped:.4f}")
+
+            return correction_clamped
+
+        except Exception as e:
+            _log(f"depth_correction: ERROR {e}")
+            return 1.0
+
+    # ── Helpers for scan/analyze two-phase flow ──
+
+    def _load_and_resize(self, img_path, _log):
+        """Load image and apply letterbox resize. Returns tuple of image data."""
         img = cv2.imread(img_path)
         if img is None:
             raise ValueError(f"No se pudo leer la imagen: {img_path}")
-        _log(f"start img_path={img_path} shape={getattr(img, 'shape', None)} visualize={visualize}")
-        
-        # Asegurar formato BGR
+        _log(f"start img_path={img_path} shape={getattr(img, 'shape', None)}")
+
         if len(img.shape) == 2:
             img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
         elif img.shape[2] == 4:
             img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-        
+
         img = np.ascontiguousarray(img)
-        
-        # Redimensionar imagen preservando aspecto (letterbox)
+
         new_width = 1040
         new_height = 640
         h_orig, w_orig = img.shape[:2]
@@ -384,34 +437,31 @@ class WeightEstimator:
         scaled_w = int(w_orig * scale_factor)
         scaled_h = int(h_orig * scale_factor)
         scaled_img = cv2.resize(img, (scaled_w, scaled_h))
-        # Centrar en canvas del tamaño objetivo (padding gris)
         resized_image = np.full((new_height, new_width, 3), 114, dtype=np.uint8)
         pad_x = (new_width - scaled_w) // 2
         pad_y = (new_height - scaled_h) // 2
         resized_image[pad_y:pad_y + scaled_h, pad_x:pad_x + scaled_w] = scaled_img
         _log(f"resize: orig={w_orig}x{h_orig} scale={scale_factor:.4f} scaled={scaled_w}x{scaled_h} pad=({pad_x},{pad_y})")
-        
-        # Convertir a RGB para visualización
+
         img_rgb = cv2.cvtColor(resized_image, cv2.COLOR_BGR2RGB)
-        
-        # PASO 1: Detectar animal usando cow_model
-        # Primero intentar en IMAGEN ORIGINAL (mayor resolución, YOLO maneja su propio resize)
-        # Si falla, fallback a imagen letterbox
+        return img, resized_image, img_rgb, scale_factor, pad_x, pad_y, w_orig, h_orig
+
+    def _detect_all_cows(self, img, resized_image, scale_factor, pad_x, pad_y, w_orig, h_orig, yolo_imgsz, _log):
+        """Run 4-strategy cow detection. Returns (boxes, keypoints, scores, classes, detected) — all arrays contain ALL detections."""
+        new_width, new_height = 1040, 640
         _cow_kwargs = dict(save=False, conf=self.keypoint_conf, iou=self.iou_threshold)
         if yolo_imgsz:
             _cow_kwargs['imgsz'] = yolo_imgsz
 
-        # Detección en imagen original
-        _log(f"cow_detection: intentando en imagen original ({w_orig}x{h_orig}) conf={self.keypoint_conf:.4f}")
-        results2_orig = self.cow_model(img, **_cow_kwargs)
-
-        # Extraer y mapear coordenadas de original → letterbox
         _cow_boxes_mapped = None
         _cow_keypoints_mapped = None
         _cow_scores = None
         _cow_classes = None
         _cow_detected = False
 
+        # Strategy 1: original image
+        _log(f"cow_detection: intentando en imagen original ({w_orig}x{h_orig}) conf={self.keypoint_conf:.4f}")
+        results2_orig = self.cow_model(img, **_cow_kwargs)
         for result in results2_orig:
             if result.boxes is not None and len(result.boxes) > 0:
                 boxes_orig = result.boxes.xyxy.cpu().numpy()
@@ -433,7 +483,7 @@ class WeightEstimator:
                     break
 
         if not _cow_detected:
-            # Fallback 1: intentar en imagen letterbox
+            # Strategy 2: letterbox image
             _log(f"cow_detection: nada en original, reintentando en letterbox ({new_width}x{new_height})")
             results2_lb = self.cow_model(resized_image, **_cow_kwargs)
             for result in results2_lb:
@@ -450,7 +500,7 @@ class WeightEstimator:
                         break
 
         if not _cow_detected:
-            # Fallback 2: cow_model con augment=True (test-time augmentation: multi-escala + flips)
+            # Strategy 3: augment=True
             _log(f"cow_detection: reintentando con augment=True en imagen original")
             try:
                 _aug_kwargs = dict(_cow_kwargs)
@@ -479,39 +529,317 @@ class WeightEstimator:
                 _log(f"cow_detection: augment falló: {e}")
 
         if not _cow_detected and self.coco_model is not None:
-            # Fallback 3: modelo COCO preentrenado (solo bbox, sin keypoints)
-            # COCO class 19 = "cow", 21 = "bear", 17 = "horse" - filtramos solo bovinos
+            # Strategy 4: COCO fallback — return ALL cow detections
             _log(f"cow_detection: reintentando con modelo COCO (yolov8n) en imagen original")
             try:
                 _coco_results = self.coco_model(img, save=False, conf=0.1, iou=self.iou_threshold, classes=[19])
-                _best_coco_box = None
-                _best_coco_score = 0
+                _all_coco_boxes = []
+                _all_coco_scores = []
                 for result in _coco_results:
                     if result.boxes is not None and len(result.boxes) > 0:
                         boxes_coco = result.boxes.xyxy.cpu().numpy()
                         scores_coco = result.boxes.conf.cpu().numpy()
                         for box, score in zip(boxes_coco, scores_coco):
-                            if score > _best_coco_score:
-                                _best_coco_score = score
-                                _best_coco_box = box
-                if _best_coco_box is not None:
+                            _all_coco_boxes.append(box)
+                            _all_coco_scores.append(float(score))
+
+                if _all_coco_boxes:
                     _cow_detected = True
-                    # Mapear a letterbox
-                    mapped = _best_coco_box.copy()
-                    mapped[0] = _best_coco_box[0] * scale_factor + pad_x
-                    mapped[1] = _best_coco_box[1] * scale_factor + pad_y
-                    mapped[2] = _best_coco_box[2] * scale_factor + pad_x
-                    mapped[3] = _best_coco_box[3] * scale_factor + pad_y
-                    _cow_boxes_mapped = np.array([mapped])
-                    _cow_scores = np.array([_best_coco_score])
-                    _cow_classes = np.array([19.0])
-                    _cow_keypoints_mapped = None  # COCO no tiene keypoints de vaca
-                    _log(f"cow_detection: COCO detectó vaca score={_best_coco_score:.3f} bbox={_best_coco_box.tolist()} (fallback 3 - solo bbox, sin keypoints)")
+                    # Sort by score descending (best first)
+                    _sorted_idx = sorted(range(len(_all_coco_scores)),
+                                         key=lambda i: _all_coco_scores[i], reverse=True)
+                    _all_coco_boxes = [_all_coco_boxes[i] for i in _sorted_idx]
+                    _all_coco_scores = [_all_coco_scores[i] for i in _sorted_idx]
+                    _log(f"cow_detection: COCO detectó {len(_all_coco_boxes)} vacas "
+                         f"scores={[f'{s:.3f}' for s in _all_coco_scores]} (fallback 3)")
+
+                    # Map ALL boxes to letterbox space
+                    mapped_boxes = []
+                    for box in _all_coco_boxes:
+                        mapped = box.copy()
+                        mapped[0] = box[0] * scale_factor + pad_x
+                        mapped[1] = box[1] * scale_factor + pad_y
+                        mapped[2] = box[2] * scale_factor + pad_x
+                        mapped[3] = box[3] * scale_factor + pad_y
+                        mapped_boxes.append(mapped)
+                    _cow_boxes_mapped = np.array(mapped_boxes)
+                    _cow_scores = np.array(_all_coco_scores)
+                    _cow_classes = np.array([19.0] * len(_all_coco_boxes))
+                    _cow_keypoints_mapped = None
+
+                    # Two-stage: try cow.pt on best detection's crop to recover keypoints
+                    _best_box = _all_coco_boxes[0]
+                    cx1, cy1, cx2, cy2 = map(int, _best_box)
+                    cw, ch = cx2 - cx1, cy2 - cy1
+                    margin_x, margin_y = int(cw * 0.25), int(ch * 0.25)
+                    crop_x1 = max(0, cx1 - margin_x)
+                    crop_y1 = max(0, cy1 - margin_y)
+                    crop_x2 = min(img.shape[1], cx2 + margin_x)
+                    crop_y2 = min(img.shape[0], cy2 + margin_y)
+                    cow_crop = img[crop_y1:crop_y2, crop_x1:crop_x2]
+
+                    if cow_crop.size > 0:
+                        _log(f"cow_detection: two-stage cow.pt on best COCO crop [{crop_x1},{crop_y1},{crop_x2},{crop_y2}]")
+                        try:
+                            _crop_results = self.cow_model(cow_crop, save=False, conf=self.keypoint_conf, iou=self.iou_threshold)
+                            for _cr in _crop_results:
+                                if _cr.boxes is not None and len(_cr.boxes) > 0 and _cr.keypoints is not None:
+                                    _crop_kps = _cr.keypoints.data.cpu().numpy()
+                                    _crop_boxes = _cr.boxes.xyxy.cpu().numpy()
+                                    # Map crop coords → original → letterbox
+                                    _crop_kps[..., 0] = (_crop_kps[..., 0] + crop_x1) * scale_factor + pad_x
+                                    _crop_kps[..., 1] = (_crop_kps[..., 1] + crop_y1) * scale_factor + pad_y
+                                    _crop_boxes[:, 0] = (_crop_boxes[:, 0] + crop_x1) * scale_factor + pad_x
+                                    _crop_boxes[:, 1] = (_crop_boxes[:, 1] + crop_y1) * scale_factor + pad_y
+                                    _crop_boxes[:, 2] = (_crop_boxes[:, 2] + crop_x1) * scale_factor + pad_x
+                                    _crop_boxes[:, 3] = (_crop_boxes[:, 3] + crop_y1) * scale_factor + pad_y
+                                    # Build keypoints array for ALL cows: only index 0 has real data
+                                    n_kps = _crop_kps.shape[1]
+                                    _cow_keypoints_mapped = np.zeros((len(_all_coco_boxes), n_kps, 3))
+                                    _cow_keypoints_mapped[0] = _crop_kps[0]
+                                    # Also refine box 0 with cow.pt's tighter bbox
+                                    _cow_boxes_mapped[0] = _crop_boxes[0]
+                                    _log(f"cow_detection: two-stage SUCCESS - keypoints for cow 0")
+                                    break
+                            if _cow_keypoints_mapped is None:
+                                _log(f"cow_detection: two-stage - cow.pt found no keypoints on crop")
+                        except Exception as e:
+                            _log(f"cow_detection: two-stage cow.pt crop failed: {e}")
             except Exception as e:
                 _log(f"cow_detection: COCO fallback falló: {e}")
 
         if not _cow_detected:
             _log(f"cow_detection: no se detectó animal con ninguna estrategia")
+
+        return _cow_boxes_mapped, _cow_keypoints_mapped, _cow_scores, _cow_classes, _cow_detected
+
+    def scan_detections(self, img_path, debug=False, debug_context="SCAN", yolo_imgsz=None):
+        """
+        Phase 1 of two-phase flow: run detection only (no weight estimation).
+        Returns all cows (with thumbnails) and all posts detected.
+        """
+        def _log(msg):
+            if debug:
+                print(f"[SCAN] {debug_context} {msg}")
+
+        img, resized_image, img_rgb, scale_factor, pad_x, pad_y, w_orig, h_orig = \
+            self._load_and_resize(img_path, _log)
+
+        boxes, keypoints, scores, classes, detected = \
+            self._detect_all_cows(img, resized_image, scale_factor, pad_x, pad_y, w_orig, h_orig, yolo_imgsz, _log)
+
+        # Build cow list with thumbnails
+        cows = []
+        if detected and boxes is not None:
+            for i in range(len(boxes)):
+                x1, y1, x2, y2 = map(int, boxes[i])
+                has_kp = (keypoints is not None and i < len(keypoints) and len(keypoints[i]) >= 5)
+                score_val = float(scores[i]) if scores is not None else 0.0
+
+                # Crop thumbnail from the resized RGB image
+                th_y1 = max(0, y1)
+                th_y2 = min(resized_image.shape[0], y2)
+                th_x1 = max(0, x1)
+                th_x2 = min(resized_image.shape[1], x2)
+                crop = resized_image[th_y1:th_y2, th_x1:th_x2]
+                thumb_b64 = ''
+                if crop.size > 0:
+                    # Resize to max 120px wide
+                    ch, cw = crop.shape[:2]
+                    if cw > 120:
+                        ratio = 120.0 / cw
+                        crop = cv2.resize(crop, (120, int(ch * ratio)))
+                    _, buf = cv2.imencode('.jpg', crop, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                    thumb_b64 = base64.b64encode(buf).decode('utf-8')
+
+                cows.append({
+                    'index': i,
+                    'bbox': [float(x1), float(y1), float(x2), float(y2)],
+                    'score': round(score_val, 3),
+                    'has_keypoints': has_kp,
+                    'thumbnail_b64': thumb_b64,
+                })
+
+        # Detect posts
+        posts = []
+        if self.use_postes_reference and self.depth_estimator:
+            postes_all = self.depth_estimator.detect_postes_all(resized_image)
+            if len(postes_all) < 2:
+                postes_orig = self.depth_estimator.detect_postes_all(img)
+                if len(postes_orig) > len(postes_all):
+                    postes_mapped = []
+                    for p in postes_orig:
+                        ox1, oy1, ox2, oy2 = p['bbox']
+                        mx1 = ox1 * scale_factor + pad_x
+                        my1 = oy1 * scale_factor + pad_y
+                        mx2 = ox2 * scale_factor + pad_x
+                        my2 = oy2 * scale_factor + pad_y
+                        mapped_p = dict(p)
+                        mapped_p['bbox'] = [mx1, my1, mx2, my2]
+                        postes_mapped.append(mapped_p)
+                    postes_all = postes_mapped
+
+            # Build post list from postes_all in detection order (by score desc).
+            # This is the order the user sees in the UI and selects from.
+            # We measure height for each post here; _select_post_for_scale is NOT used
+            # because it reorders by height/distance, which would make the indices
+            # inconsistent with what estimate_weight receives as post_indices.
+            scan_posts_for_ui = []
+            for p in postes_all:
+                measured_height = self._measure_post_height(resized_image, p['bbox'], debug=False)
+                scan_posts_for_ui.append({**p, 'measured_height_px': measured_height})
+
+            for idx, p in enumerate(scan_posts_for_ui):
+                measured_h = p.get('measured_height_px')
+
+                # Crop post thumbnail from resized image
+                pb = p['bbox']
+                px1c, py1c, px2c, py2c = int(pb[0]), int(pb[1]), int(pb[2]), int(pb[3])
+                # Add small margin around post
+                pm = max(10, int((px2c - px1c) * 0.3))
+                px1c = max(0, px1c - pm)
+                py1c = max(0, py1c - pm)
+                px2c = min(resized_image.shape[1], px2c + pm)
+                py2c = min(resized_image.shape[0], py2c + pm)
+                post_crop = resized_image[py1c:py2c, px1c:px2c]
+                post_thumb_b64 = ''
+                if post_crop.size > 0:
+                    ph, pw = post_crop.shape[:2]
+                    if pw > 100:
+                        ratio = 100.0 / pw
+                        post_crop = cv2.resize(post_crop, (100, int(ph * ratio)))
+                    _, pbuf = cv2.imencode('.jpg', post_crop, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                    post_thumb_b64 = base64.b64encode(pbuf).decode('utf-8')
+
+                posts.append({
+                    'index': idx,
+                    'bbox': [float(v) for v in p['bbox']],
+                    'measured_height_px': float(measured_h) if measured_h else None,
+                    'score': round(float(p.get('score', 0)), 3),
+                    'red_ratio': round(float(p.get('yellow_ratio', 0)), 3),
+                    'in_band': bool(p.get('in_band', False)),
+                    'thumbnail_b64': post_thumb_b64,
+                })
+
+        # Build annotated preview image showing all cows and posts
+        preview_rgb = img_rgb.copy()
+        for cow in cows:
+            cx1, cy1, cx2, cy2 = map(int, cow['bbox'])
+            color = (0, 255, 0)
+            cv2.rectangle(preview_rgb, (cx1, cy1), (cx2, cy2), color, 2)
+            lbl = f"Vaca {cow['index']+1} ({cow['score']*100:.0f}%)"
+            cv2.putText(preview_rgb, lbl, (cx1, max(15, cy1 - 8)),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+        for post in posts:
+            px1, py1, px2, py2 = map(int, post['bbox'])
+            color = (255, 0, 255)
+            cv2.rectangle(preview_rgb, (px1, py1), (px2, py2), color, 2)
+            h_str = f"{post['measured_height_px']:.0f}px" if post['measured_height_px'] else '?'
+            lbl = f"Poste {post['index']+1} ({h_str})"
+            cv2.putText(preview_rgb, lbl, (px1, max(15, py1 - 8)),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 2)
+
+        # Encode preview as base64 JPEG
+        preview_bgr = cv2.cvtColor(preview_rgb, cv2.COLOR_RGB2BGR)
+        _, buf = cv2.imencode('.jpg', preview_bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        preview_b64 = base64.b64encode(buf).decode('utf-8')
+
+        _log(f"scan complete: {len(cows)} cows, {len(posts)} posts")
+        return {'cows': cows, 'posts': posts, 'preview_b64': preview_b64}
+
+    def estimate_weight(self, img_path, visualize=True, debug=False, debug_context="", return_eye_coords=False, return_keypoint_coords=False, roi_offset=(0, 0), scale_method='both', breed="desconocido", category="desconocido", age_range="desconocido", override_cm_per_px=None, yolo_imgsz=None, cow_index=0, post_indices=None):
+        """
+        Estima el peso del ganado en una imagen
+        
+        Args:
+            img_path: Ruta a la imagen del ganado
+            visualize: Si True, retorna también la imagen procesada con visualizaciones
+            debug: Si True, imprime logs de debug
+            debug_context: Contexto adicional para los logs
+            return_eye_coords: Si True, retorna también las coordenadas de los ojos detectados
+            return_keypoint_coords: Si True, retorna también las coordenadas de los keypoints usados para dist1 y dist2
+            scale_method: Método de escala a usar ('both', 'eyes', 'poste')
+                - 'both': Busca ojos primero, luego poste rojo como fallback
+                - 'eyes': Solo busca ojos
+                - 'poste': Solo busca poste rojo (50cm)
+        
+        Returns:
+            Si visualize=True y return_eye_coords=False y return_keypoint_coords=False: (imagen_procesada, peso_estimado)
+            Si visualize=True y return_eye_coords=True: (imagen_procesada, peso_estimado, eye_coords, keypoint_coords)
+            Si visualize=False y return_eye_coords=True: (peso_estimado, eye_coords, keypoint_coords) o (None, [], [])
+            Si visualize=False y return_eye_coords=False: peso_estimado o None si no se puede calcular
+        """
+        def _log(msg: str):
+            if debug:
+                prefix = "[WEIGHT]"
+                ctx = f" {debug_context}".strip()
+                print(f"{prefix}{(' ' + ctx) if ctx else ''} {msg}")
+
+        t0 = time.time()
+
+        # Use shared helpers for image loading and cow detection
+        img, resized_image, img_rgb, scale_factor, pad_x, pad_y, w_orig, h_orig = \
+            self._load_and_resize(img_path, _log)
+        _log(f"start img_path={img_path} shape={getattr(img, 'shape', None)} visualize={visualize}")
+
+        new_width = 1040
+        new_height = 640
+
+        _cow_boxes_mapped, _cow_keypoints_mapped, _cow_scores, _cow_classes, _cow_detected = \
+            self._detect_all_cows(img, resized_image, scale_factor, pad_x, pad_y, w_orig, h_orig, yolo_imgsz, _log)
+
+        # Select which cow to analyze (cow_index param, clamped to valid range)
+        _ci = 0
+        if _cow_detected and _cow_boxes_mapped is not None and len(_cow_boxes_mapped) > 0:
+            _ci = min(cow_index, len(_cow_boxes_mapped) - 1)
+            _ci = max(0, _ci)
+            if cow_index != 0:
+                _log(f"cow_selection: cow_index={cow_index} -> using index {_ci} of {len(_cow_boxes_mapped)} detections")
+
+        # Two-stage recovery: if selected cow has no keypoints, try cow.pt on its crop
+        if (_cow_detected and _cow_boxes_mapped is not None and _ci < len(_cow_boxes_mapped)):
+            _need_kp_recovery = (_cow_keypoints_mapped is None or
+                                 _ci >= len(_cow_keypoints_mapped) or
+                                 float(np.max(_cow_keypoints_mapped[_ci][:, 2])) < 0.01)
+            if _need_kp_recovery:
+                _log(f"cow_selection: no keypoints for cow {_ci}, trying two-stage recovery")
+                _box_lb = _cow_boxes_mapped[_ci]
+                # Reverse map letterbox → original image
+                _ox1 = int((_box_lb[0] - pad_x) / scale_factor)
+                _oy1 = int((_box_lb[1] - pad_y) / scale_factor)
+                _ox2 = int((_box_lb[2] - pad_x) / scale_factor)
+                _oy2 = int((_box_lb[3] - pad_y) / scale_factor)
+                _ow, _oh = _ox2 - _ox1, _oy2 - _oy1
+                _mx, _my = int(_ow * 0.25), int(_oh * 0.25)
+                _cx1 = max(0, _ox1 - _mx)
+                _cy1 = max(0, _oy1 - _my)
+                _cx2 = min(img.shape[1], _ox2 + _mx)
+                _cy2 = min(img.shape[0], _oy2 + _my)
+                _cow_crop = img[_cy1:_cy2, _cx1:_cx2]
+                if _cow_crop.size > 0:
+                    try:
+                        _rec_results = self.cow_model(_cow_crop, save=False, conf=self.keypoint_conf, iou=self.iou_threshold)
+                        for _rr in _rec_results:
+                            if _rr.boxes is not None and len(_rr.boxes) > 0 and _rr.keypoints is not None:
+                                _rec_kps = _rr.keypoints.data.cpu().numpy()
+                                _rec_boxes = _rr.boxes.xyxy.cpu().numpy()
+                                # Map crop → original → letterbox
+                                _rec_kps[..., 0] = (_rec_kps[..., 0] + _cx1) * scale_factor + pad_x
+                                _rec_kps[..., 1] = (_rec_kps[..., 1] + _cy1) * scale_factor + pad_y
+                                _rec_boxes[:, 0] = (_rec_boxes[:, 0] + _cx1) * scale_factor + pad_x
+                                _rec_boxes[:, 1] = (_rec_boxes[:, 1] + _cy1) * scale_factor + pad_y
+                                _rec_boxes[:, 2] = (_rec_boxes[:, 2] + _cx1) * scale_factor + pad_x
+                                _rec_boxes[:, 3] = (_rec_boxes[:, 3] + _cy1) * scale_factor + pad_y
+                                # Inject recovered keypoints into the arrays
+                                if _cow_keypoints_mapped is None:
+                                    n_kps = _rec_kps.shape[1]
+                                    _cow_keypoints_mapped = np.zeros((len(_cow_boxes_mapped), n_kps, 3))
+                                _cow_keypoints_mapped[_ci] = _rec_kps[0]
+                                _cow_boxes_mapped[_ci] = _rec_boxes[0]
+                                _log(f"cow_selection: two-stage recovery SUCCESS for cow {_ci}")
+                                break
+                    except Exception as e:
+                        _log(f"cow_selection: two-stage recovery failed: {e}")
 
         # Obtener bbox del animal para definir región de cabeza
         head_region = None
@@ -519,7 +847,7 @@ class WeightEstimator:
         img_height, img_width = resized_image.shape[:2]
 
         if _cow_detected and _cow_boxes_mapped is not None and len(_cow_boxes_mapped) > 0:
-            animal_x1, animal_y1, animal_x2, animal_y2 = map(int, _cow_boxes_mapped[0])
+            animal_x1, animal_y1, animal_x2, animal_y2 = map(int, _cow_boxes_mapped[_ci])
             animal_bbox = (animal_x1, animal_y1, animal_x2, animal_y2)
             animal_height = animal_y2 - animal_y1
 
@@ -548,6 +876,7 @@ class WeightEstimator:
         dist = None
         dist1 = None
         dist2 = None
+        _bbox_fallback_used = False
         eyes_masks_count = 0
         eye_coords = []  # Lista para almacenar coordenadas de ojos detectados
         eye_centers = []  # Lista para almacenar centros de ojos para calcular distancia
@@ -752,7 +1081,7 @@ class WeightEstimator:
             scores = _cow_scores
             classes = _cow_classes
 
-            if len(keypoints) > 0 and len(keypoints[0]) >= 5:
+            if len(keypoints) > 0 and _ci < len(keypoints) and len(keypoints[_ci]) >= 5:
                 # Keypoint mapping (from cow.pt training):
                 #   KP0: head/poll          KP5: leg/hoof
                 #   KP1: pinbone (hip)      KP6: back/topline
@@ -765,10 +1094,10 @@ class WeightEstimator:
 
                 # Each keypoint has [x, y, confidence]. Filter by confidence.
                 MIN_KP_CONF = 0.3  # Minimum per-keypoint confidence to trust its position
-                kp1_conf = float(keypoints[0][1][2])
-                kp2_conf = float(keypoints[0][2][2])
-                kp3_conf = float(keypoints[0][3][2])
-                kp4_conf = float(keypoints[0][4][2])
+                kp1_conf = float(keypoints[_ci][1][2])
+                kp2_conf = float(keypoints[_ci][2][2])
+                kp3_conf = float(keypoints[_ci][3][2])
+                kp4_conf = float(keypoints[_ci][4][2])
 
                 _log(f"keypoint_confs: KP1(pinbone)={kp1_conf:.3f} KP2(shoulder)={kp2_conf:.3f} KP3(girth_bot)={kp3_conf:.3f} KP4(girth_top)={kp4_conf:.3f} min_required={MIN_KP_CONF}")
 
@@ -789,10 +1118,10 @@ class WeightEstimator:
                 else:
                     keypoints_found = True
 
-                point1 = keypoints[0][1][0], keypoints[0][1][1]
-                point2 = keypoints[0][2][0], keypoints[0][2][1]
-                point3 = keypoints[0][3][0], keypoints[0][3][1]
-                point4 = keypoints[0][4][0], keypoints[0][4][1]
+                point1 = keypoints[_ci][1][0], keypoints[_ci][1][1]
+                point2 = keypoints[_ci][2][0], keypoints[_ci][2][1]
+                point3 = keypoints[_ci][3][0], keypoints[_ci][3][1]
+                point4 = keypoints[_ci][4][0], keypoints[_ci][4][1]
 
                 if keypoints_found:
                     dist1 = self.euclidean(point1, point2)
@@ -824,16 +1153,31 @@ class WeightEstimator:
                     ]
 
                 if visualize:
-                    for keypoint, box, score, cls in zip(keypoints, boxes, scores, classes):
+                    # Draw ALL cow bboxes: selected cow in green, others in gray
+                    for det_idx, (box, score, cls) in enumerate(zip(boxes, scores, classes)):
                         x1, y1, x2, y2 = map(int, box)
-                        cv2.rectangle(img_rgb, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                        if det_idx == _ci:
+                            # Selected cow: green bbox
+                            cv2.rectangle(img_rgb, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                            cls_name = self.cow_model.names.get(int(cls), 'Cow')
+                            label = f'{cls_name} {score:.2f}'
+                            cv2.putText(img_rgb, label, (x1, y1 - 10),
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                        else:
+                            # Other cows: gray bbox with index label
+                            cv2.rectangle(img_rgb, (x1, y1), (x2, y2), (160, 160, 160), 1)
+                            cv2.putText(img_rgb, f'cow {det_idx+1}', (x1, y1 - 5),
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (160, 160, 160), 1)
 
-                        # Dibujar todos los keypoints
+                    # Draw keypoints only for the selected cow
+                    if _ci < len(keypoints):
+                        keypoint = keypoints[_ci]
                         for kp in keypoint:
                             kp_x, kp_y = int(kp[0]), int(kp[1])
                             cv2.circle(img_rgb, (kp_x, kp_y), 3, (0, 0, 255), -1)
 
-                        # Resaltar los keypoints usados para dist1 y dist2 con colores diferentes
+                    # Resaltar los keypoints usados para dist1 y dist2 (only when accepted)
+                    if keypoints_found and dist1 is not None and dist2 is not None:
                         # point1 y point2 para dist1 (azul)
                         cv2.circle(img_rgb, (int(point1[0]), int(point1[1])), 8, (255, 0, 0), 2)
                         cv2.circle(img_rgb, (int(point2[0]), int(point2[1])), 8, (255, 0, 0), 2)
@@ -843,10 +1187,6 @@ class WeightEstimator:
                         cv2.circle(img_rgb, (int(point3[0]), int(point3[1])), 8, (255, 255, 0), 2)
                         cv2.circle(img_rgb, (int(point4[0]), int(point4[1])), 8, (255, 255, 0), 2)
                         cv2.line(img_rgb, (int(point3[0]), int(point3[1])), (int(point4[0]), int(point4[1])), (255, 255, 0), 2)
-
-                        label = f'{self.cow_model.names[int(cls)]} {score:.2f}'
-                        cv2.putText(img_rgb, label, (x1, y1 - 10),
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
 
                         # Etiquetas para dist1 y dist2
                         mid1_x, mid1_y = int((point1[0] + point2[0]) / 2), int((point1[1] + point2[1]) / 2)
@@ -858,12 +1198,62 @@ class WeightEstimator:
         
         _log(f"keypoints: found={keypoints_found} dist1={'ok' if dist1 else 'missing'} dist2={'ok' if dist2 else 'missing'}")
 
+        # Fallback: estimate dist1/dist2 from COCO bounding box when keypoints unavailable
+        if not keypoints_found and animal_bbox and _cow_keypoints_mapped is None:
+            ax1, ay1, ax2, ay2 = animal_bbox
+            bbox_w = ax2 - ax1
+            bbox_h = ay2 - ay1
+            BBOX_BODY_LENGTH_RATIO = 0.80
+            BBOX_GIRTH_VERT_RATIO = 0.60
+            dist1 = bbox_w * BBOX_BODY_LENGTH_RATIO
+            dist2 = bbox_h * BBOX_GIRTH_VERT_RATIO
+            keypoints_found = True
+            _bbox_fallback_used = True
+            _log(f"keypoints: BBOX_FALLBACK dist1={dist1:.1f}px (bbox_w={bbox_w:.0f}*0.80) "
+                 f"dist2={dist2:.1f}px (bbox_h={bbox_h:.0f}*0.60)")
+
+            # Visualize bbox-estimated measurements mimicking keypoint style
+            if visualize:
+                ax1_i, ay1_i, ax2_i, ay2_i = int(ax1), int(ay1), int(ax2), int(ay2)
+                # Draw cow bbox in green (like cow.pt detection)
+                cv2.rectangle(img_rgb, (ax1_i, ay1_i), (ax2_i, ay2_i), (0, 255, 0), 2)
+
+                # dist1 (body length): horizontal line at ~35% from top (spine level)
+                # Same blue color as keypoint dist1: (255, 0, 0)
+                spine_y = int(ay1_i + bbox_h * 0.35)
+                margin_x = int(bbox_w * (1 - BBOX_BODY_LENGTH_RATIO) / 2)
+                p1 = (ax1_i + margin_x, spine_y)  # "pinbone" (left)
+                p2 = (ax2_i - margin_x, spine_y)  # "shoulder" (right)
+                cv2.circle(img_rgb, p1, 8, (255, 0, 0), 2)
+                cv2.circle(img_rgb, p2, 8, (255, 0, 0), 2)
+                cv2.line(img_rgb, p1, p2, (255, 0, 0), 2)
+                mid1_x, mid1_y = (p1[0] + p2[0]) // 2, (p1[1] + p2[1]) // 2
+                cv2.putText(img_rgb, f'dist1={dist1:.1f}px', (mid1_x, mid1_y - 8),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1)
+
+                # dist2 (girth vertical): vertical line at ~55% from left (ribcage area)
+                # Same cyan color as keypoint dist2: (255, 255, 0)
+                girth_x = int(ax1_i + bbox_w * 0.55)
+                margin_y = int(bbox_h * (1 - BBOX_GIRTH_VERT_RATIO) / 2)
+                p3 = (girth_x, ay1_i + margin_y)   # "girth top" (withers)
+                p4 = (girth_x, ay2_i - margin_y)   # "girth bottom"
+                cv2.circle(img_rgb, p3, 8, (255, 255, 0), 2)
+                cv2.circle(img_rgb, p4, 8, (255, 255, 0), 2)
+                cv2.line(img_rgb, p3, p4, (255, 255, 0), 2)
+                mid2_x, mid2_y = (p3[0] + p4[0]) // 2, (p3[1] + p4[1]) // 2
+                cv2.putText(img_rgb, f'dist2={dist2:.1f}px', (mid2_x + 5, mid2_y),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
+
         # Detectar postes (solo si scale_method no es 'eyes')
+        # Skip post detection entirely when override_cm_per_px is provided (batch mode)
+        # — the calibrated scale replaces everything, so detecting posts is wasted work
         postes_all = []
         poste_selected = None
         poste_candidates = []
         poste_rejected = []
-        if scale_method != 'eyes' and self.use_postes_reference and self.depth_estimator:
+        if override_cm_per_px is not None:
+            _log(f"postes: SKIP detección (override_cm_per_px={override_cm_per_px:.5f} provisto, usando calibración directa)")
+        elif scale_method != 'eyes' and self.use_postes_reference and self.depth_estimator:
             _log(f"postes: iniciando detección (scale_method={scale_method})")
             postes_all = self.depth_estimator.detect_postes_all(resized_image)
             _log(f"postes: detectados {len(postes_all)} postes por YOLO (letterbox)")
@@ -890,9 +1280,22 @@ class WeightEstimator:
             if postes_all:
                 for i, p in enumerate(postes_all):
                     _log(f"postes: [{i}] bbox={p['bbox']} score={p.get('score', 0):.3f} red_ratio={p.get('yellow_ratio', 0):.3f}")
-            
+
+            # Filter by user-selected indices BEFORE reordering
+            # post_indices refer to the score-ordered list from scan_detections,
+            # which is the same order as postes_all (detect_postes_all returns by score desc).
+            # We must filter BEFORE _select_post_for_scale which reorders by height/distance.
+            if post_indices is not None and len(postes_all) > 0:
+                _log(f"postes: filtering by post_indices={post_indices} (from {len(postes_all)} detected)")
+                filtered_all = [p for idx, p in enumerate(postes_all) if idx in post_indices]
+                if filtered_all:
+                    _log(f"postes: after filter: {len(filtered_all)} postes kept: {[p['bbox'] for p in filtered_all]}")
+                    postes_all = filtered_all
+                else:
+                    _log(f"postes: WARNING - post_indices filter resulted in 0 postes, keeping all {len(postes_all)}")
+
             poste_selected, poste_candidates, poste_rejected = self._select_post_for_scale(
-                postes_all, resized_image, animal_bbox=animal_bbox, band_tolerance=0.2
+                postes_all, resized_image, animal_bbox=animal_bbox, band_tolerance=0.5
             )
             _log(f"postes: selección completada - selected={poste_selected is not None} candidates={len(poste_candidates)} rejected={len(poste_rejected)}")
             
@@ -920,50 +1323,30 @@ class WeightEstimator:
             if animal_bbox:
                 ax1, ay1, ax2, ay2 = map(int, animal_bbox)
                 animal_height = max(1, ay2 - ay1)
-                band_top = max(0, int(ay1 - animal_height * 0.2))
-                band_bottom = min(img_height - 1, int(ay2 + animal_height * 0.2))
+                band_top = max(0, int(ay1 - animal_height * 0.5))
+                band_bottom = img_height - 1  # Sin límite inferior
                 cv2.rectangle(img_rgb, (ax1, ay1), (ax2, ay2), (0, 255, 255), 2)
                 cv2.line(img_rgb, (0, band_top), (img_width, band_top), (255, 255, 0), 2)
-                cv2.line(img_rgb, (0, band_bottom), (img_width, band_bottom), (255, 255, 0), 2)
 
-            # Mostrar TODOS los postes detectados inicialmente (en magenta/rosa para distinguirlos)
-            for i, p in enumerate(postes_all):
-                x1, y1, x2, y2 = map(int, p['bbox'])
-                # Color magenta/rosa para todos los postes detectados
-                cv2.rectangle(img_rgb, (x1, y1), (x2, y2), (255, 0, 255), 2)
-                # Etiqueta con número e información
-                label = f'POSTE {i+1}'
-                score = p.get('score', 0)
-                red_ratio = p.get('yellow_ratio', 0)
-                cv2.putText(img_rgb, f'{label} (score:{score:.2f} rojo:{red_ratio:.2f})', 
-                           (x1, max(15, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
-            
-            # Mostrar candidatos (en azul)
-            for p in poste_candidates:
-                x1, y1, x2, y2 = map(int, p['bbox'])
-                cv2.rectangle(img_rgb, (x1, y1), (x2, y2), (255, 0, 0), 2)  # Azul para candidatos
-                cv2.putText(img_rgb, 'CANDIDATO', (x1, y2 + 15),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1)
-            
-            # Mostrar rechazados (en rojo claro)
-            for p in poste_rejected:
-                x1, y1, x2, y2 = map(int, p['bbox'])
-                cv2.rectangle(img_rgb, (x1, y1), (x2, y2), (0, 0, 200), 2)  # Rojo más claro para rechazados
-                reason = p.get('reason', 'rejected')
-                cv2.putText(img_rgb, f'RECHAZADO ({reason})', (x1, y2 + 15),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 200), 1)
-            
-            # Mostrar línea de medición en cada candidato (todos son referencia, usamos promedio)
+            # Mostrar postes y mediciones SOLO debajo de la franja amarilla (band_top)
             measured_heights = []
             for idx_c, p in enumerate(poste_candidates):
                 x1, y1, x2, y2 = map(int, p['bbox'])
+                # Solo dibujar postes cuya base (y2) esté debajo de band_top
+                if animal_bbox and y2 < band_top:
+                    continue
                 measured_h = p.get('measured_height_px')
                 if measured_h and measured_h > 0:
                     measured_heights.append(measured_h)
-                    # Recuadro verde para candidatos de referencia
+                    # Recuadro magenta + verde para candidatos visibles
+                    cv2.rectangle(img_rgb, (x1, y1), (x2, y2), (255, 0, 255), 2)
+                    score = p.get('score', 0)
+                    red_ratio = p.get('yellow_ratio', 0)
+                    cv2.putText(img_rgb, f'POSTE {idx_c+1} (score:{score:.2f} rojo:{red_ratio:.2f})',
+                               (x1, max(15, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
+                    # Recuadro verde para referencia
                     cv2.rectangle(img_rgb, (x1, y1), (x2, y2), (0, 200, 0), 3)
-                    # Etiqueta
-                    label_ref = f'REF {idx_c+1}: {measured_h:.1f}px = 122cm'
+                    label_ref = f'REF {idx_c+1}: {measured_h:.1f}px = 50cm'
                     (tw_r, th_r), _ = cv2.getTextSize(label_ref, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
                     cv2.rectangle(img_rgb, (x1, max(0, y1 - th_r - 10)), (x1 + tw_r + 4, max(0, y1 - 2)), (0, 0, 0), -1)
                     cv2.putText(img_rgb, label_ref, (x1 + 2, max(th_r + 2, y1 - 4)),
@@ -981,72 +1364,171 @@ class WeightEstimator:
                     cv2.putText(img_rgb, f'{measured_h:.1f}px', (cx + 8, mid_post_y - 5),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
 
-            # Mostrar promedio si hay 2+ candidatos
+            # Línea de escala interpolada entre topes de los 2 postes (naranja)
+            # Sólo cuando el usuario seleccionó exactamente 2 postes y hay vaca.
+            if (post_indices is not None and animal_bbox
+                    and len([p for p in poste_candidates
+                             if p.get('measured_height_px') and p.get('measured_height_px') > 0]) == 2):
+                _vis_pts = []
+                for _p in poste_candidates:
+                    _mh = _p.get('measured_height_px')
+                    if not (_mh and _mh > 0):
+                        continue
+                    _x1p, _y1p, _x2p, _y2p = map(int, _p['bbox'])
+                    if _y2p < band_top:
+                        continue
+                    _cxp = (_x1p + _x2p) // 2
+                    _top_yp = int(_y2p - _mh)
+                    _vis_pts.append((_cxp, _top_yp, float(_mh)))
+                if len(_vis_pts) == 2:
+                    _vis_pts.sort(key=lambda v: v[0])
+                    (_px1, _py1, _mh1), (_px2, _py2, _mh2) = _vis_pts
+                    cv2.line(img_rgb, (_px1, _py1), (_px2, _py2), (0, 165, 255), 2)
+                    cv2.circle(img_rgb, (_px1, _py1), 6, (0, 165, 255), -1)
+                    cv2.circle(img_rgb, (_px2, _py2), 6, (0, 165, 255), -1)
+                    _ax1i, _ay1i, _ax2i, _ay2i = map(int, animal_bbox)
+                    # Intersección de la línea de escala con y = _ay1i (tope del bbox), con extrapolación permitida
+                    if _py2 != _py1:
+                        _sample_x_v_f = _px1 + (_px2 - _px1) * (_ay1i - _py1) / float(_py2 - _py1)
+                    else:
+                        _sample_x_v_f = (_px1 + _px2) / 2.0
+                    _sample_x_v = int(round(_sample_x_v_f))
+                    if _px2 != _px1:
+                        _tv = (_sample_x_v_f - _px1) / float(_px2 - _px1)
+                    else:
+                        _tv = 0.5
+                    _sh = _mh1 + _tv * (_mh2 - _mh1)
+                    # Dibujar: extender la línea de escala hasta el sample_x si está fuera del segmento
+                    _sx_draw = max(0, min(img_width - 1, _sample_x_v))
+                    cv2.line(img_rgb, (_px1, _py1), (_sx_draw, _ay1i), (0, 255, 255), 1)
+                    cv2.line(img_rgb, (_px2, _py2), (_sx_draw, _ay1i), (0, 255, 255), 1)
+                    cv2.circle(img_rgb, (_sx_draw, _ay1i), 7, (0, 255, 255), -1)
+                    _lbl = f'SCALE@cow: {_sh:.1f}px = {self.poste_height_cm:.0f}cm'
+                    (_tw, _th), _ = cv2.getTextSize(_lbl, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+                    _lx = max(0, min(img_width - _tw - 4, _sx_draw - _tw // 2))
+                    _ly = max(_th + 4, _ay1i - 10)
+                    cv2.rectangle(img_rgb, (_lx - 2, _ly - _th - 4), (_lx + _tw + 2, _ly + 4), (0, 0, 0), -1)
+                    cv2.putText(img_rgb, _lbl, (_lx, _ly),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
+
+            # Mostrar promedio si hay 2+ postes visibles
             if len(measured_heights) >= 2:
                 avg_h = sum(measured_heights) / len(measured_heights)
-                avg_text = f'PROMEDIO: {avg_h:.1f}px = 122cm'
+                avg_text = f'PROMEDIO: {avg_h:.1f}px = 50cm'
                 (tw_a, th_a), _ = cv2.getTextSize(avg_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-                # Mostrar en la esquina superior derecha
                 avg_x = img_width - tw_a - 10
                 avg_y = 25
                 cv2.rectangle(img_rgb, (avg_x - 4, avg_y - th_a - 6), (avg_x + tw_a + 4, avg_y + 6), (0, 0, 0), -1)
                 cv2.putText(img_rgb, avg_text, (avg_x, avg_y),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         
-        # Intentar usar postes como referencia alternativa SOLO si está habilitado explícitamente
+        # Calcular escala desde postes o usar override
         escala_postes = None
-        
-        # IMPORTANTE: Solo intentar usar postes si está explícitamente habilitado
-        if self.use_postes_reference and self.depth_estimator:
-            _log(f"postes: intentando usar postes como referencia (habilitado)")
-            # animal_bbox ya fue extraído y mapeado a letterbox en PASO 1
-            
-            resultado_depth = None
-            if animal_bbox:
-                # Pasar measured_height_px del poste seleccionado para mayor precisión
-                _poste_measured_h = poste_selected.get('measured_height_px') if poste_selected else None
-                resultado_depth = self.depth_estimator.estimar_escala_con_postes(
-                    resized_image,
-                    animal_bbox=animal_bbox,
-                    debug=debug,
-                    measured_height_px=_poste_measured_h
-                )
-                escala_postes = resultado_depth.get('escala')
+        _scale_direct_from_postes = False
 
-                if escala_postes:
-                    _log(f"postes: escala={escala_postes:.4f} cm/px profundidad_postes={resultado_depth.get('profundidad_postes'):.2f}cm profundidad_animal={resultado_depth.get('profundidad_animal'):.2f}cm")
-
-                    # Validar que la vaca esté entre ambos postes (horizontalmente)
-                    _p1_bbox = resultado_depth.get('poste1_bbox')
-                    _p2_bbox = resultado_depth.get('poste2_bbox')
-                    if _p1_bbox and _p2_bbox and animal_bbox:
-                        _p1_cx = (_p1_bbox[0] + _p1_bbox[2]) / 2
-                        _p2_cx = (_p2_bbox[0] + _p2_bbox[2]) / 2
-                        _post_left = min(_p1_cx, _p2_cx)
-                        _post_right = max(_p1_cx, _p2_cx)
-                        _animal_cx = (animal_bbox[0] + animal_bbox[2]) / 2
-                        if _post_left <= _animal_cx <= _post_right:
-                            _log(f"postes: vaca entre postes OK (animal_cx={_animal_cx:.1f} entre [{_post_left:.1f}, {_post_right:.1f}])")
-                        else:
-                            _log(f"postes: RECHAZADO - vaca NO está entre postes (animal_cx={_animal_cx:.1f} fuera de [{_post_left:.1f}, {_post_right:.1f}])")
-                            escala_postes = None
+        if override_cm_per_px is not None:
+            # Calibración externa provista — usar directamente, sin detección de postes ni depth
+            escala_postes = override_cm_per_px
+            _log(f"postes: usando override_cm_per_px={override_cm_per_px:.5f} (calibración directa, skip depth)")
+        elif post_indices is not None and len(poste_candidates) > 0:
+            # User explicitly selected cintas — compute scale from their heights.
+            # Skip depth estimator (which re-detects its own posts and ignores user selection).
+            _valid = [c for c in poste_candidates
+                      if c.get('measured_height_px') and c.get('measured_height_px') > 0]
+            if len(_valid) == 2 and animal_bbox:
+                # Intersección de la línea de escala (entre topes de los 2 postes)
+                # con el borde superior del bbox de la vaca (y = ay1).
+                # Se permite extrapolación si el tope del bbox está fuera del rango vertical del segmento.
+                _posts_xh = []
+                for _p in _valid:
+                    _x1p, _y1p, _x2p, _y2p = _p['bbox']
+                    _mhp = float(_p['measured_height_px'])
+                    _top_yp = float(_y2p) - _mhp
+                    _posts_xh.append(((_x1p + _x2p) / 2.0, _top_yp, _mhp))
+                _posts_xh.sort(key=lambda v: v[0])
+                (_cx1, _py1s, _h1), (_cx2, _py2s, _h2) = _posts_xh
+                _ax1, _ay1, _ax2, _ay2 = animal_bbox
+                if _py2s != _py1s:
+                    _sample_x = _cx1 + (_cx2 - _cx1) * (_ay1 - _py1s) / (_py2s - _py1s)
                 else:
-                    _log(f"postes: no se pudo calcular escala con postes (se requieren ambos postes visibles)")
+                    _sample_x = (_cx1 + _cx2) / 2.0
+                if _cx2 != _cx1:
+                    _t = (_sample_x - _cx1) / (_cx2 - _cx1)  # sin clamp: permite extrapolación
+                else:
+                    _t = 0.5
+                _h_at_cow = _h1 + _t * (_h2 - _h1)
+                if _h_at_cow > 0:
+                    escala_postes = self.poste_height_cm / _h_at_cow
+                    _scale_direct_from_postes = True
+                    _log(f"postes: USER_SELECTED_INTERP escala={escala_postes:.4f} cm/px "
+                         f"(p1=(x={_cx1:.0f},py={_py1s:.0f},h={_h1:.1f}), "
+                         f"p2=(x={_cx2:.0f},py={_py2s:.0f},h={_h2:.1f}), "
+                         f"bbox_top_y={_ay1:.0f}, sample_x={_sample_x:.1f}, "
+                         f"t={_t:.3f}, h_interp={_h_at_cow:.1f}px)")
+                else:
+                    _heights = [c['measured_height_px'] for c in _valid]
+                    _avg_h = sum(_heights) / len(_heights)
+                    escala_postes = self.poste_height_cm / _avg_h
+                    _scale_direct_from_postes = True
+                    _log(f"postes: USER_SELECTED_INTERP_INVALID (h_interp={_h_at_cow:.1f}<=0) "
+                         f"→ fallback AVG escala={escala_postes:.4f} cm/px")
+            elif _valid:
+                _heights = [c['measured_height_px'] for c in _valid]
+                _avg_h = sum(_heights) / len(_heights)
+                escala_postes = self.poste_height_cm / _avg_h
+                _scale_direct_from_postes = True
+                _log(f"postes: USER_SELECTED_AVG escala={escala_postes:.4f} cm/px "
+                     f"(poste_height={self.poste_height_cm}cm / avg_measured={_avg_h:.1f}px "
+                     f"from {len(_heights)} cintas: {[f'{h:.0f}px' for h in _heights]})")
             else:
-                _log(f"postes: no se puede usar postes (no hay bbox de animal)")
+                _log(f"postes: WARNING - user-selected cintas have no valid heights")
+        elif self.use_postes_reference and self.depth_estimator:
+            _log(f"postes: calculando escala desde postes seleccionados")
+
+            _scale_direct_from_postes = False
+
+            # Solo promediar si hay más de 1 poste seleccionado, si no usar el único disponible
+            if poste_candidates:
+                _heights = [c.get('measured_height_px') for c in poste_candidates
+                            if c.get('measured_height_px') and c.get('measured_height_px') > 0]
+                _poste_cm = self.poste_height_cm
+                if len(_heights) >= 2:
+                    _avg_h = sum(_heights) / len(_heights)
+                    escala_postes = _poste_cm / _avg_h
+                    _log(f"postes: AVG_POSTS_FALLBACK escala={escala_postes:.4f} cm/px "
+                         f"(poste_height={_poste_cm}cm / avg_measured={_avg_h:.1f}px "
+                         f"from {len(_heights)} postes: {[f'{h:.0f}px' for h in _heights]})")
+                elif len(_heights) == 1:
+                    escala_postes = _poste_cm / _heights[0]
+                    _log(f"postes: SINGLE_POST_FALLBACK escala={escala_postes:.4f} cm/px "
+                         f"(poste_height={_poste_cm}cm / measured={_heights[0]:.1f}px)")
+            elif escala_postes is None and poste_selected:
+                _measured_h = poste_selected.get('measured_height_px')
+                if _measured_h and _measured_h > 0:
+                    _poste_cm = self.poste_height_cm
+                    escala_postes = _poste_cm / _measured_h
+                    _log(f"postes: SINGLE_POST_FALLBACK escala={escala_postes:.4f} cm/px "
+                         f"(poste_height={_poste_cm}cm / measured={_measured_h:.1f}px)")
         else:
             if not self.use_postes_reference:
                 _log(f"postes: deshabilitado (use_postes_reference=False)")
             elif not self.depth_estimator:
                 _log(f"postes: no disponible (depth_estimator no inicializado)")
 
-        # Flag: la escala fue calculada directamente de 2 postes visibles en ESTE frame
-        _scale_direct_from_postes = escala_postes is not None and self.use_postes_reference
-
-        # Fallback: usar escala cacheada externamente (ej. de frames anteriores del video)
-        if escala_postes is None and override_cm_per_px is not None:
-            escala_postes = override_cm_per_px
-            _log(f"postes: usando override_cm_per_px={override_cm_per_px:.5f} (escala cacheada de frames anteriores)")
+        # Corrección de escala por profundidad usando Depth Anything V2
+        # (skip when using calibrated override — the calibration is already correct)
+        _depth_correction_factor = 1.0
+        if escala_postes is not None and override_cm_per_px is None and self.depth_pipe is not None and animal_bbox and poste_candidates:
+            _depth_correction_factor = self._get_depth_scale_correction(
+                resized_image, animal_bbox, poste_candidates, _log
+            )
+            if abs(_depth_correction_factor - 1.0) > 0.01:
+                _escala_before = escala_postes
+                escala_postes *= _depth_correction_factor
+                _log(f"depth_correction: APPLIED factor={_depth_correction_factor:.4f} "
+                     f"escala {_escala_before:.4f} → {escala_postes:.4f} cm/px")
+            else:
+                _log(f"depth_correction: factor={_depth_correction_factor:.4f} ~1.0, no adjustment needed")
 
         # Pre-compute available cm_per_px from VALID references only
         # (used for calibration in video — only trust 2-post or eye-based scale)
@@ -1080,19 +1562,20 @@ class WeightEstimator:
                     dist2cm = None
                     _log(f"weight_method=eyes: ojos no detectados, no se puede calcular peso")
             elif scale_method == 'poste':
-                # Solo usar postes rojos (se requieren AMBOS postes visibles y vaca entre ellos)
-                _log(f"weight_method=poste: verificando disponibilidad - escala_postes={escala_postes is not None} use_postes_reference={self.use_postes_reference}")
+                # Usar postes rojos (preferir 2 postes, fallback a 1 poste)
+                _log(f"weight_method=poste: verificando disponibilidad - escala_postes={escala_postes is not None} use_postes_reference={self.use_postes_reference} direct_2post={_scale_direct_from_postes}")
                 if escala_postes and self.use_postes_reference:
                     dist1cm = dist1 * escala_postes
                     dist2cm = dist2 * escala_postes
-                    _log(f"weight_method=postes_dobles escala={escala_postes:.4f}cm/px (ambos postes visibles, vaca entre ellos)")
+                    _scale_source = "2_postes" if _scale_direct_from_postes else "1_poste_fallback"
+                    _log(f"weight_method=poste escala={escala_postes:.4f}cm/px source={_scale_source}")
                 else:
                     dist1cm = None
                     dist2cm = None
                     if not self.use_postes_reference:
                         _log(f"weight_method=poste: use_postes_reference=False")
                     else:
-                        _log(f"weight_method=poste: se requieren ambos postes visibles con la vaca entre ellos para calcular escala")
+                        _log(f"weight_method=poste: no se detectaron postes para calcular escala")
             else:  # scale_method == 'both'
                 # Usar ojos primero, luego postes dobles como fallback
                 # NOTA: Se requieren AMBOS postes visibles con la vaca entre ellos
@@ -1144,6 +1627,8 @@ class WeightEstimator:
                     'has_scale_reference': False,
                     'poste_selected': poste_selected['bbox'] if poste_selected else None,
                     'postes_heights_px': [c.get('measured_height_px') for c in poste_candidates if c.get('measured_height_px') and c.get('measured_height_px') > 0] if 'poste_candidates' in locals() else [],
+                    'keypoints_found': True,
+                    'cow_score': float(_cow_scores[_ci]) if _cow_scores is not None and _ci < len(_cow_scores) else None,
                 }
                 if visualize:
                     if return_eye_coords and return_keypoint_coords:
@@ -1211,6 +1696,17 @@ class WeightEstimator:
                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 0), 1)
                 _log(f"viz: animal_height_cm={animal_h_cm:.1f} ({animal_h_px}px * {cm_per_px:.5f}cm/px)")
 
+            # Visualización: indicador de corrección por profundidad
+            if visualize and abs(_depth_correction_factor - 1.0) > 0.01:
+                _dc_text = f'Depth corr: {_depth_correction_factor:.2f}x'
+                _dc_color = (0, 200, 255)  # naranja
+                (tw_dc, th_dc), _ = cv2.getTextSize(_dc_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                _dc_x = img_width - tw_dc - 10
+                _dc_y = 50
+                cv2.rectangle(img_rgb, (_dc_x - 4, _dc_y - th_dc - 4), (_dc_x + tw_dc + 4, _dc_y + 4), (0, 0, 0), -1)
+                cv2.putText(img_rgb, _dc_text, (_dc_x, _dc_y),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, _dc_color, 1)
+
             # Intentar circunferencia con profundidad monocular
             girth_circumference_cm = None
             _girth_left_edge = None
@@ -1242,7 +1738,9 @@ class WeightEstimator:
 
             multiplier = get_weight_multiplier(breed, category, age_range)
             weight = raw_weight * multiplier
-            _log(f"weight=ok value={weight:.4f}kg raw={raw_weight:.4f}kg multiplier={multiplier:.4f} breed={breed} category={category} age={age_range} BL(dist1cm)={dist1cm:.2f} GirthVert(dist2cm)={dist2cm:.2f} girth_circ={'%.2f' % girth_circumference_cm if girth_circumference_cm else 'N/A'}cm elapsed_ms={(time.time()-t0)*1000:.1f}")
+            _bbox_approx_tag = " (bbox_approx)" if _bbox_fallback_used else ""
+            _depth_tag = f" depth_corr={_depth_correction_factor:.3f}" if abs(_depth_correction_factor - 1.0) > 0.01 else ""
+            _log(f"weight=ok{_bbox_approx_tag}{_depth_tag} value={weight:.4f}kg raw={raw_weight:.4f}kg multiplier={multiplier:.4f} breed={breed} category={category} age={age_range} BL(dist1cm)={dist1cm:.2f} GirthVert(dist2cm)={dist2cm:.2f} girth_circ={'%.2f' % girth_circumference_cm if girth_circumference_cm else 'N/A'}cm elapsed_ms={(time.time()-t0)*1000:.1f}")
             
             # Determinar qué método de escala se usó
             scale_method_used = None
@@ -1309,6 +1807,7 @@ class WeightEstimator:
                 'age_range': age_range,
                 'weight_multiplier': multiplier,
                 'raw_weight': round(raw_weight, 2),
+                'cow_score': float(_cow_scores[_ci]) if _cow_scores is not None and _ci < len(_cow_scores) else None,
             }
             
             # Manejar diferentes combinaciones de retorno
@@ -1361,7 +1860,7 @@ class WeightEstimator:
                     rejected = len(poste_rejected) if 'poste_rejected' in locals() else 0
                     missing_list.append(f'poste rojo (detectados {postes_count} postes, {candidates} candidatos, {rejected} rechazados - ninguno seleccionado)')
                 else:
-                    missing_list.append('poste rojo (referencia de escala de 122cm)')
+                    missing_list.append('poste rojo (referencia de escala de 50cm)')
             else:  # 'both'
                 if not bool(dist) and not (poste_selected is not None):
                     missing_list.append('ojos o poste rojo (referencia de escala)')
@@ -1403,8 +1902,9 @@ class WeightEstimator:
             'animal_bbox_height_px': _animal_bbox_height_px,
             'dist1_px': float(dist1) if dist1 else None,
             'dist2_px': float(dist2) if dist2 else None,
+            'cow_score': float(_cow_scores[_ci]) if '_cow_scores' in locals() and _cow_scores is not None and '_ci' in locals() and _ci < len(_cow_scores) else None,
         }
-        
+
         # Manejar diferentes combinaciones de retorno cuando no hay peso
         # Incluir error_details en el retorno cuando sea posible
         if visualize and return_eye_coords and return_keypoint_coords:

@@ -12,6 +12,14 @@
     <script src="https://cdn.bootcss.com/jquery/3.3.1/jquery.min.js"></script>
     <script src="https://cdn.bootcss.com/bootstrap/4.0.0/js/bootstrap.min.js"></script>
     <link href="{{ url_for('static', filename='css/main.css') }}" rel="stylesheet">
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
 </head>
 
 <body>
@@ -21,5 +29,6 @@
 </body>
 
 <script src="{{ url_for('static', filename='js/engine.js') }}?v={{ range(100000, 999999) | random }}" type="text/javascript"></script>
+<script type="module" src="{{ url_for('static', filename='js/viewer3d.js') }}?v={{ range(100000, 999999) | random }}"></script>
 
 </html>

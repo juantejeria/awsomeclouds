@@ -268,7 +268,6 @@ Ejemplo: Brahman × Ternero × 0-6 meses = `0.93 × 0.84 × 0.85 = 0.664`
 | POST   | `/predict`               | Procesa una imagen (reconocimiento + peso)            |
 | POST   | `/predict_video`         | Procesa un video completo con tracking multi-vaca     |
 | POST   | `/detect_reference_points` | Detecta postes rojos y muestra mediciones           |
-| POST   | `/detect_posts_all`      | Detecta todos los postes del alambrado (experimental) |
 
 ### Parámetros de `/predict` y `/predict_video`
 

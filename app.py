@@ -1,21 +1,46 @@
-from flask import Flask, redirect, url_for, request, render_template, jsonify, session
+from flask import Flask, redirect, url_for, request, render_template, jsonify, session, Response, stream_with_context
 from werkzeug.utils import secure_filename
 import os
 import tensorflow as tf
 from testing import ModelLoad, ImageScore
 from weight_estimation import WeightEstimator
 from depth_estimation import DepthEstimator
-from breed_coefficients import BREED_OPTIONS, CATEGORY_OPTIONS, AGE_OPTIONS
+from breed_coefficients import BREED_OPTIONS, CATEGORY_OPTIONS, AGE_OPTIONS, get_weight_range, get_estimated_height, HEIGHT_BY_CATEGORY_AGE
 from video_processor import VideoProcessor
+from generar_modelos3d_batch import procesar_frame, filtrar_outliers, guardar_ply, detectar_vaca, segmentar, recortar_torso
+from reconstruccion_3d import sfm_desde_frames, sfm_real_desde_frames, modelo_hibrido, guardar_ply_con_malla, generar_imagen_resumen
 import operator
 import configparser
 import tempfile
 import uuid
+import time as _time
 from tensorflow.keras import backend as K
 import base64
 import cv2 
 import numpy as np
 import math
+import json
+import statistics
+
+
+class NumpyEncoder(json.JSONEncoder):
+    """JSON encoder that handles numpy types."""
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
+
+
+# Override json.dumps for SSE events to always use NumpyEncoder
+_json_dumps_original = json.dumps
+def _json_dumps_safe(*args, **kwargs):
+    kwargs.setdefault('cls', NumpyEncoder)
+    return _json_dumps_original(*args, **kwargs)
+json.dumps = _json_dumps_safe
 
 # HSV del rojo de referencia (rojo tiene dos rangos: 0-15 y 165-180)
 # Más tolerante a sombras y variaciones de tono del rojo.
@@ -51,13 +76,14 @@ try:
     EYE_CONF_MULTIPLIER = 0.1  # 0.05 * 0.1 = 0.005 (muy permisivo para ojos)
     KEYPOINT_CONF_MULTIPLIER = 0.1  # 0.05 * 0.1 = 0.005 (muy permisivo para keypoints)
     weight_estimator = WeightEstimator(
-        conf_threshold=YOLO_CONF, 
+        conf_threshold=YOLO_CONF,
         iou_threshold=YOLO_IOU,
         eye_conf_multiplier=EYE_CONF_MULTIPLIER,
         keypoint_conf_multiplier=KEYPOINT_CONF_MULTIPLIER,
         use_postes_reference=True,
-        poste1_height_cm=122,
-        poste2_height_cm=122
+        poste1_height_cm=50,
+        poste2_height_cm=50,
+        use_monocular_depth=True
     )
 except Exception as e:
     print(f"Advertencia: No se pudieron cargar los modelos de estimación de peso: {e}")
@@ -72,6 +98,37 @@ try:
 except Exception as e:
     print(f"Advertencia: No se pudo cargar el modelo de postes: {e}")
     depth_estimator = None
+
+# ── Frame cache for two-phase scan/analyze flow ──
+_frame_cache = {}  # UUID → {'path': str, 'created': float}
+_FRAME_CACHE_TTL = 300  # 5 minutes
+
+def _cache_frame(temp_path):
+    """Store a frame path in cache and return its UUID."""
+    frame_id = uuid.uuid4().hex
+    _frame_cache[frame_id] = {'path': temp_path, 'created': _time.time()}
+    return frame_id
+
+def _get_cached_frame(frame_id):
+    """Return cached frame path or None if expired/missing."""
+    _cleanup_frame_cache()
+    entry = _frame_cache.get(frame_id)
+    if entry and os.path.exists(entry['path']):
+        return entry['path']
+    return None
+
+def _cleanup_frame_cache():
+    """Remove entries older than TTL and delete their files."""
+    now = _time.time()
+    expired = [fid for fid, e in _frame_cache.items() if now - e['created'] > _FRAME_CACHE_TTL]
+    for fid in expired:
+        try:
+            path = _frame_cache[fid]['path']
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            pass
+        del _frame_cache[fid]
 
 def get_file_path_and_save(request, is_video=False):
     # Get the file from post request
@@ -491,169 +548,6 @@ def detect_reference_points():
 
         return jsonify(result)
 
-@app.route('/detect_posts_all', methods=['POST'])
-def detect_posts_all():
-    """
-    Detecta todos los postes del alambrado en una imagen y los marca en rojo.
-    """
-    if request.method == 'POST':
-        file_path = get_file_path_and_save(request)
-
-        result = {
-            'success': False,
-            'count': 0,
-            'boxes': []
-        }
-
-        try:
-            image = cv2.imread(file_path)
-            if image is None:
-                raise ValueError('No se pudo leer la imagen')
-
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            gray = cv2.GaussianBlur(gray, (5, 5), 0)
-            thresh = cv2.adaptiveThreshold(
-                gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 31, 5
-            )
-
-            # Resaltar estructuras verticales
-            vert_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 35))
-            vertical = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, vert_kernel, iterations=1)
-
-            contours, _ = cv2.findContours(vertical, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-            h, w = image.shape[:2]
-            boxes = []
-            for cnt in contours:
-                rect = cv2.minAreaRect(cnt)
-                (cx, cy), (rw, rh), angle = rect
-                if rw == 0 or rh == 0:
-                    continue
-
-                length = max(rw, rh)
-                thickness = min(rw, rh)
-
-                if length < h * 0.10:
-                    continue
-                if thickness > w * 0.12:
-                    continue
-                aspect = length / max(thickness, 1.0)
-                if aspect < 2.0:
-                    continue
-
-                x, y, bw, bh = cv2.boundingRect(cnt)
-                if bw > w * 0.3:
-                    continue
-                boxes.append([x, y, x + bw, y + bh])
-
-            # Fusionar cajas cercanas en X (mismo poste)
-            boxes = sorted(boxes, key=lambda b: (b[0] + b[2]) / 2)
-            merged = []
-            for b in boxes:
-                if not merged:
-                    merged.append(b)
-                    continue
-                px = (merged[-1][0] + merged[-1][2]) / 2
-                cx = (b[0] + b[2]) / 2
-                if abs(cx - px) < 8:
-                    # Unir cajas
-                    merged[-1] = [
-                        min(merged[-1][0], b[0]),
-                        min(merged[-1][1], b[1]),
-                        max(merged[-1][2], b[2]),
-                        max(merged[-1][3], b[3])
-                    ]
-                else:
-                    merged.append(b)
-
-            # Dividir cajas muy anchas (probable unión entre postes)
-            split_boxes = []
-            for b in merged:
-                x1, y1, x2, y2 = map(int, b)
-                bw = x2 - x1
-                if bw > 40:
-                    roi_edges = vertical[y1:y2, x1:x2]
-                    if roi_edges.size == 0:
-                        split_boxes.append(b)
-                        continue
-                    col_sum = np.sum(roi_edges > 0, axis=0)
-                    threshold = max(2, int(0.05 * (y2 - y1)))
-                    strong_cols = np.where(col_sum >= threshold)[0]
-                    if strong_cols.size == 0:
-                        split_boxes.append(b)
-                        continue
-                    # Agrupar columnas fuertes en segmentos
-                    segments = []
-                    start = strong_cols[0]
-                    prev = strong_cols[0]
-                    for c in strong_cols[1:]:
-                        if c - prev > 3:
-                            segments.append((start, prev))
-                            start = c
-                        prev = c
-                    segments.append((start, prev))
-
-                    for s in segments:
-                        sx1 = x1 + s[0]
-                        sx2 = x1 + s[1]
-                        if sx2 - sx1 < 6:
-                            continue
-                        split_boxes.append([sx1, y1, sx2, y2])
-                else:
-                    split_boxes.append(b)
-
-            annotated = image.copy()
-            for b in split_boxes:
-                x1, y1, x2, y2 = map(int, b)
-                cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 2)
-
-                roi_edges = vertical[y1:y2, x1:x2]
-                if roi_edges.size > 0:
-                    lines = cv2.HoughLinesP(
-                        roi_edges,
-                        rho=1,
-                        theta=np.pi / 180,
-                        threshold=30,
-                        minLineLength=max(20, int((y2 - y1) * 0.4)),
-                        maxLineGap=10
-                    )
-                else:
-                    lines = None
-
-                if lines is not None and len(lines) > 0:
-                    # Elegir la línea más larga (vector dirección)
-                    best = None
-                    best_len = 0
-                    for line in lines:
-                        lx1, ly1, lx2, ly2 = line[0]
-                        length = math.sqrt((lx2 - lx1) ** 2 + (ly2 - ly1) ** 2)
-                        if length > best_len:
-                            best_len = length
-                            best = (lx1, ly1, lx2, ly2)
-                    if best:
-                        lx1, ly1, lx2, ly2 = best
-                        cv2.line(annotated, (x1 + lx1, y1 + ly1), (x1 + lx2, y1 + ly2), (0, 0, 255), 3)
-                else:
-                    # Fallback: línea vertical en el centro del bbox
-                    cx = int((x1 + x2) / 2)
-                    cv2.line(annotated, (cx, y1), (cx, y2), (0, 0, 255), 3)
-
-            _, buffer = cv2.imencode('.jpg', annotated)
-            img_base64 = base64.b64encode(buffer).decode('utf-8')
-            result['image'] = f"data:image/jpeg;base64,{img_base64}"
-            result['boxes'] = [{'bbox': [float(x1), float(y1), float(x2), float(y2)]} for x1, y1, x2, y2 in split_boxes]
-            result['count'] = len(split_boxes)
-            result['success'] = True
-        except Exception as e:
-            result['error'] = str(e)
-        finally:
-            try:
-                os.remove(file_path)
-            except:
-                pass
-
-        return jsonify(result)
-        
 @app.route('/video')
 def video_analysis():
     """Manual video frame analysis page - no model loading needed"""
@@ -662,26 +556,85 @@ def video_analysis():
                          category_options=CATEGORY_OPTIONS,
                          age_options=AGE_OPTIONS)
 
+@app.route('/scan_frame', methods=['POST'])
+def scan_frame():
+    """Phase 1: Run detection only, return all cows (with thumbnails) and posts."""
+    file = request.files.get('frame')
+    if not file:
+        return jsonify({'success': False, 'error': 'No frame provided'})
+
+    temp_path = os.path.join(tempfile.gettempdir(), f'frame_{uuid.uuid4().hex}.jpg')
+    file.save(temp_path)
+
+    try:
+        if not weight_estimator:
+            os.remove(temp_path)
+            return jsonify({'success': False, 'error': 'Weight estimator not available'})
+
+        # Cache the frame (do NOT delete — it will be used by /analyze_frame)
+        frame_id = _cache_frame(temp_path)
+
+        scan_result = weight_estimator.scan_detections(
+            temp_path, debug=True, debug_context="SCAN_FRAME"
+        )
+
+        return jsonify({
+            'success': True,
+            'frame_image_id': frame_id,
+            'cows': scan_result['cows'],
+            'posts': scan_result['posts'],
+            'preview_image': 'data:image/jpeg;base64,' + scan_result.get('preview_b64', ''),
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        # Clean up on error
+        try:
+            os.remove(temp_path)
+        except Exception:
+            pass
+        return jsonify({'success': False, 'error': str(e)})
+
 @app.route('/analyze_frame', methods=['POST'])
 def analyze_frame():
     """Analyze a single frame from the video player canvas"""
+    # Support both cached frame (from /scan_frame) and direct upload
+    frame_image_id = request.form.get('frame_image_id')
     file = request.files.get('frame')
-    if not file:
+
+    if not frame_image_id and not file:
         return jsonify({'success': False, 'error': 'No frame provided'})
 
     breed = request.form.get('breed', 'desconocido')
     category = request.form.get('category', 'desconocido')
     age_range = request.form.get('age_range', 'desconocido')
 
-    # Save to temp file
-    temp_path = os.path.join(tempfile.gettempdir(), f'frame_{uuid.uuid4().hex}.jpg')
-    file.save(temp_path)
+    # Parse optional selection params (from two-phase flow)
+    cow_index = int(request.form.get('cow_index', 0))
+    post_indices_str = request.form.get('post_indices', '')
+    post_indices = None
+    if post_indices_str:
+        try:
+            post_indices = [int(x.strip()) for x in post_indices_str.split(',') if x.strip()]
+        except ValueError:
+            post_indices = None
+
+    # Resolve frame path: cached (from /scan_frame) or direct upload
+    _from_cache = False
+    if frame_image_id:
+        temp_path = _get_cached_frame(frame_image_id)
+        if not temp_path:
+            return jsonify({'success': False, 'error': 'Frame cache expired, please re-scan'})
+        _from_cache = True
+    else:
+        temp_path = os.path.join(tempfile.gettempdir(), f'frame_{uuid.uuid4().hex}.jpg')
+        file.save(temp_path)
 
     try:
         if not weight_estimator:
             return jsonify({'success': False, 'error': 'Weight estimator not available'})
 
-        # Call estimate_weight with all return options
+        # Call estimate_weight with all return options + cow/post selection
         result_tuple = weight_estimator.estimate_weight(
             temp_path,
             visualize=True,
@@ -693,6 +646,8 @@ def analyze_frame():
             breed=breed,
             category=category,
             age_range=age_range,
+            cow_index=cow_index,
+            post_indices=post_indices,
         )
 
         # Unpack 5-tuple: (img_rgb, weight, eye_coords, kp_coords, details)
@@ -722,17 +677,15 @@ def analyze_frame():
         if dist2_px is None and isinstance(details, dict):
             dist2_px = details.get('dist2_px')
 
-        # Calculate cow_height_cm: needs 2 posts (for scale) + cow detected (for height)
+        # Use cm_per_px from estimate_weight (consistent with user's cinta selection)
         cm_per_px = details.get('cm_per_px') if isinstance(details, dict) else None
         animal_bbox_height_px = details.get('animal_bbox_height_px') if isinstance(details, dict) else None
         postes_heights = details.get('postes_heights_px', []) if isinstance(details, dict) else []
         cow_height_cm = None
 
-        if len(postes_heights) >= 2 and animal_bbox_height_px:
-            avg_post_height_px = sum(postes_heights) / len(postes_heights)
-            cm_per_px = 122.0 / avg_post_height_px
+        if cm_per_px and animal_bbox_height_px:
             cow_height_cm = animal_bbox_height_px * cm_per_px
-            print(f"[FRAME_ANALYZE] Using avg post height: {postes_heights} -> avg={avg_post_height_px:.1f}px -> cm_per_px={cm_per_px:.5f} -> cow_height={cow_height_cm:.1f}cm")
+            print(f"[FRAME_ANALYZE] Using estimate_weight cm_per_px={cm_per_px:.5f} -> cow_height={cow_height_cm:.1f}cm (bbox_h={animal_bbox_height_px:.0f}px, postes_heights={postes_heights})")
 
         postes_detected = details.get('postes_detected', 0) if isinstance(details, dict) else 0
         message = details.get('message', '') if isinstance(details, dict) else ''
@@ -773,14 +726,655 @@ def analyze_frame():
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)})
     finally:
+        # Only delete if NOT from cache (cache has its own TTL cleanup)
+        if not _from_cache:
+            try:
+                os.remove(temp_path)
+            except:
+                pass
+
+@app.route('/batch_screen', methods=['POST'])
+def batch_screen():
+    """Batch screen all video frames, returning results as SSE stream."""
+    video_file = request.files.get('video')
+    if not video_file:
+        return jsonify({'error': 'No video provided'}), 400
+
+    cm_per_px = request.form.get('cm_per_px')
+    if not cm_per_px:
+        return jsonify({'error': 'cm_per_px is required'}), 400
+    cm_per_px = float(cm_per_px)
+
+    frame_interval = int(request.form.get('frame_interval', 30))
+    min_cow_score = float(request.form.get('min_cow_score', 0.75))
+    breed = request.form.get('breed', 'desconocido')
+    category = request.form.get('category', 'desconocido')
+    age_range = request.form.get('age_range', 'desconocido')
+
+    # Parse post_indices from calibration (only use these posts)
+    post_indices_str = request.form.get('post_indices', '')
+    post_indices = None
+    if post_indices_str:
         try:
-            os.remove(temp_path)
-        except:
-            pass
+            post_indices = [int(x.strip()) for x in post_indices_str.split(',') if x.strip()]
+        except ValueError:
+            post_indices = None
+
+    weight_min, weight_max = get_weight_range(category)
+
+    # Save uploaded video to temp file
+    temp_video_path = os.path.join(tempfile.gettempdir(), f'batch_{uuid.uuid4().hex}.mp4')
+    video_file.save(temp_video_path)
+
+    def generate():
+        cap = None
+        try:
+            cap = cv2.VideoCapture(temp_video_path)
+            if not cap.isOpened():
+                yield f"event: error\ndata: {json.dumps({'message': 'No se pudo abrir el video'})}\n\n"
+                return
+
+            fps = cap.get(cv2.CAP_PROP_FPS) or 30
+            total_frames_prop = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+            # CAP_PROP_FRAME_COUNT no es confiable en muchos codecs.
+            cap.set(cv2.CAP_PROP_POS_AVI_RATIO, 1)
+            duration_msec_end = cap.get(cv2.CAP_PROP_POS_MSEC)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+            if duration_msec_end > 0:
+                duration_sec = duration_msec_end / 1000.0
+                total_frames_duration = int(round(fps * duration_sec))
+                total_frames = max(total_frames_prop, total_frames_duration)
+                print(f"  [Screening] FRAME_COUNT={total_frames_prop}, duration_based={total_frames_duration}, using={total_frames}")
+            else:
+                total_frames = total_frames_prop
+
+            real_interval = max(1, int(round(frame_interval * fps / 30.0)))
+            frames_to_process = max(1, total_frames // real_interval)
+            print(f"  [Screening] fps={fps:.1f}, frame_interval_param={frame_interval}, real_interval={real_interval}, total_frames={total_frames}, to_process={frames_to_process}")
+
+            yield f"event: started\ndata: {json.dumps({'total_frames': total_frames, 'frames_to_process': frames_to_process, 'fps': fps})}\n\n"
+
+            processed = 0
+            all_results = []
+
+            for frame_num in range(0, total_frames, real_interval):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+                ret, frame = cap.read()
+                if not ret:
+                    processed += 1
+                    yield f"event: frame_skip\ndata: {json.dumps({'frame_num': frame_num, 'processed': processed, 'total': frames_to_process, 'reason': 'read_error'})}\n\n"
+                    continue
+
+                # Write frame to temp JPEG
+                temp_frame_path = os.path.join(tempfile.gettempdir(), f'bframe_{uuid.uuid4().hex}.jpg')
+                cv2.imwrite(temp_frame_path, frame)
+
+                try:
+                    if not weight_estimator:
+                        processed += 1
+                        yield f"event: frame_skip\ndata: {json.dumps({'frame_num': frame_num, 'processed': processed, 'total': frames_to_process, 'reason': 'no_estimator'})}\n\n"
+                        continue
+
+                    # Single estimate_weight call with same params as /analyze_frame
+                    # (no separate scan_detections — cow_score comes from details dict)
+                    result_tuple = weight_estimator.estimate_weight(
+                        temp_frame_path,
+                        visualize=True,
+                        debug=True,
+                        debug_context=f"BATCH_F{frame_num}",
+                        return_eye_coords=True,
+                        return_keypoint_coords=True,
+                        scale_method='poste',
+                        breed=breed,
+                        category=category,
+                        age_range=age_range,
+                        cow_index=0,
+                        post_indices=post_indices,
+                        override_cm_per_px=cm_per_px,
+                    )
+
+                    # Unpack 5-tuple (same as analyze_frame)
+                    img_rgb = result_tuple[0]
+                    weight = result_tuple[1]
+                    eye_coords = result_tuple[2]
+                    kp_coords = result_tuple[3]
+                    details = result_tuple[4] if len(result_tuple) > 4 else {}
+
+                    processed += 1
+
+                    # Check cow confidence from estimate_weight result
+                    cow_score = details.get('cow_score') if isinstance(details, dict) else None
+                    if min_cow_score > 0 and cow_score is not None and cow_score < min_cow_score:
+                        yield f"event: frame_skip\ndata: {json.dumps({'frame_num': frame_num, 'processed': processed, 'total': frames_to_process, 'reason': 'low_cow_score', 'cow_score': round(cow_score, 3)})}\n\n"
+                        continue
+
+                    # Extract dist1_px and dist2_px from kp_coords (same as analyze_frame)
+                    dist1_px = None
+                    dist2_px = None
+                    if kp_coords and len(kp_coords) > 0:
+                        last_kp = kp_coords[-1]
+                        if isinstance(last_kp, dict):
+                            dist1_px = last_kp.get('dist1_px')
+                            dist2_px = last_kp.get('dist2_px')
+                    if dist1_px is None and isinstance(details, dict):
+                        dist1_px = details.get('dist1_px')
+                    if dist2_px is None and isinstance(details, dict):
+                        dist2_px = details.get('dist2_px')
+
+                    # Determine keypoints_found (same 3-tier check as analyze_frame)
+                    keypoints_found = False
+                    if kp_coords and len(kp_coords) > 0:
+                        last_kp = kp_coords[-1]
+                        if isinstance(last_kp, dict):
+                            keypoints_found = bool(last_kp.get('keypoints_accepted', False))
+                    if not keypoints_found and isinstance(details, dict):
+                        keypoints_found = bool(details.get('keypoints_found', False))
+                    if not keypoints_found and dist1_px is not None and dist2_px is not None:
+                        keypoints_found = True
+
+                    if weight is None or not keypoints_found:
+                        reason = 'no_keypoints'
+                        if isinstance(details, dict) and details.get('message'):
+                            reason = details['message']
+                        yield f"event: frame_skip\ndata: {json.dumps({'frame_num': frame_num, 'processed': processed, 'total': frames_to_process, 'reason': reason})}\n\n"
+                        continue
+
+                    # Calculate cow_height_cm (same as analyze_frame)
+                    animal_bbox_height_px = details.get('animal_bbox_height_px') if isinstance(details, dict) else None
+                    postes_heights = details.get('postes_heights_px', []) if isinstance(details, dict) else []
+                    cow_height_cm = None
+
+                    if len(postes_heights) >= 2 and animal_bbox_height_px:
+                        avg_post_height_px = sum(postes_heights) / len(postes_heights)
+                        calc_cm_per_px = 50.0 / avg_post_height_px
+                        cow_height_cm = animal_bbox_height_px * calc_cm_per_px
+                        print(f"[BATCH_F{frame_num}] cow_height: posts={postes_heights} -> avg={avg_post_height_px:.1f}px -> cm_per_px={calc_cm_per_px:.5f} -> height={cow_height_cm:.1f}cm")
+
+                    # Generate thumbnail (640px wide for larger gallery display)
+                    annotated_thumb_b64 = ''
+                    if img_rgb is not None:
+                        h, w = img_rgb.shape[:2]
+                        thumb_w = 640
+                        thumb_h = int(h * thumb_w / w)
+                        thumb = cv2.resize(img_rgb, (thumb_w, thumb_h), interpolation=cv2.INTER_AREA)
+                        thumb_bgr = cv2.cvtColor(thumb, cv2.COLOR_RGB2BGR)
+                        _, buf = cv2.imencode('.jpg', thumb_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                        annotated_thumb_b64 = base64.b64encode(buf).decode('utf-8')
+
+                    in_range = weight_min <= weight <= weight_max
+
+                    frame_result = {
+                        'frame_num': frame_num,
+                        'processed': processed,
+                        'total': frames_to_process,
+                        'keypoints_found': True,
+                        'weight_kg': round(weight, 2),
+                        'in_range': in_range,
+                        'annotated_thumb': annotated_thumb_b64,
+                        'dist1_px': dist1_px,
+                        'dist2_px': dist2_px,
+                        'cm_per_px': details.get('cm_per_px') if isinstance(details, dict) else None,
+                        'animal_bbox_height_px': animal_bbox_height_px,
+                        'cow_score': round(cow_score, 3) if cow_score else None,
+                        'cow_height_cm': round(cow_height_cm, 2) if cow_height_cm else None,
+                        'postes_heights_px': postes_heights,
+                    }
+
+                    all_results.append(frame_result)
+                    yield f"event: frame_result\ndata: {json.dumps(frame_result)}\n\n"
+
+                except Exception as e:
+                    processed += 1
+                    yield f"event: frame_skip\ndata: {json.dumps({'frame_num': frame_num, 'processed': processed, 'total': frames_to_process, 'reason': str(e)})}\n\n"
+                finally:
+                    try:
+                        os.remove(temp_frame_path)
+                    except Exception:
+                        pass
+
+            # Summary
+            valid_results = [r for r in all_results if r['in_range']]
+            valid_weights = [r['weight_kg'] for r in valid_results]
+            all_weights = [r['weight_kg'] for r in all_results]
+
+            summary = {
+                'total_processed': processed,
+                'detected_count': len(all_results),
+                'valid_count': len(valid_results),
+                'outlier_count': len(all_results) - len(valid_results),
+                'weight_range': [weight_min, weight_max],
+            }
+
+            if valid_weights:
+                summary['avg_weight'] = round(statistics.mean(valid_weights), 2)
+                summary['median_weight'] = round(statistics.median(valid_weights), 2)
+                summary['std_dev'] = round(statistics.stdev(valid_weights), 2) if len(valid_weights) > 1 else 0
+                summary['min_weight'] = round(min(valid_weights), 2)
+                summary['max_weight'] = round(max(valid_weights), 2)
+            elif all_weights:
+                summary['avg_weight'] = round(statistics.mean(all_weights), 2)
+                summary['median_weight'] = round(statistics.median(all_weights), 2)
+                summary['std_dev'] = round(statistics.stdev(all_weights), 2) if len(all_weights) > 1 else 0
+                summary['min_weight'] = round(min(all_weights), 2)
+                summary['max_weight'] = round(max(all_weights), 2)
+
+            yield f"event: complete\ndata: {json.dumps({'summary': summary})}\n\n"
+
+        except Exception as e:
+            yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
+        finally:
+            if cap:
+                cap.release()
+            try:
+                os.remove(temp_video_path)
+            except Exception:
+                pass
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',
+        }
+    )
+
+
+@app.route('/api/video_modelo3d', methods=['POST'])
+def video_modelo3d():
+    """SfM: extract frames → single 3D reconstruction → single volume/weight. SSE stream."""
+    video_file = request.files.get('video')
+    if not video_file:
+        return jsonify({'error': 'No video provided'}), 400
+
+    cow_height_cm = request.form.get('cow_height_cm')
+    if not cow_height_cm:
+        return jsonify({'error': 'cow_height_cm is required'}), 400
+    cow_height_cm = float(cow_height_cm)
+
+    frame_interval = int(request.form.get('frame_interval', 30))
+    vaca_name = request.form.get('vaca_name', 'vaca_video')
+    vaca_name = secure_filename(vaca_name) or 'vaca_video'
+    mode = request.form.get('mode', 'hibrido')  # 'hibrido' or 'sfm'
+
+    temp_video_path = os.path.join(tempfile.gettempdir(), f'modelo3d_{uuid.uuid4().hex}.mp4')
+    video_file.save(temp_video_path)
+
+    if not weight_estimator:
+        os.remove(temp_video_path)
+        return jsonify({'error': 'Weight estimator not loaded'}), 500
+    cow_model = weight_estimator.cow_model
+    coco_model = weight_estimator.coco_model
+
+    def generate():
+        cap = None
+        try:
+            cap = cv2.VideoCapture(temp_video_path)
+            if not cap.isOpened():
+                yield f"event: error\ndata: {json.dumps({'message': 'No se pudo abrir el video'})}\n\n"
+                return
+
+            fps = cap.get(cv2.CAP_PROP_FPS) or 30
+            total_frames_prop = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+            # CAP_PROP_FRAME_COUNT no es confiable en muchos codecs.
+            # Verificar con duración real si es posible.
+            # Seek al final para contar frames reales
+            duration_msec = cap.get(cv2.CAP_PROP_POS_MSEC)
+            cap.set(cv2.CAP_PROP_POS_AVI_RATIO, 1)  # seek al final
+            duration_msec_end = cap.get(cv2.CAP_PROP_POS_MSEC)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # volver al inicio
+
+            if duration_msec_end > 0:
+                duration_sec = duration_msec_end / 1000.0
+                total_frames_duration = int(round(fps * duration_sec))
+                # Usar el mayor entre FRAME_COUNT y el calculado por duración
+                total_frames = max(total_frames_prop, total_frames_duration)
+                print(f"  [Modelo3D] FRAME_COUNT={total_frames_prop}, duration_based={total_frames_duration}, using={total_frames}")
+            else:
+                total_frames = total_frames_prop
+                duration_sec = total_frames / fps if fps > 0 else 0
+
+            # frame_interval viene como "cada N frames asumiendo 30fps"
+            # Convertir a intervalo real basado en el FPS del video
+            # Ej: frame_interval=30 con video a 15fps → real_interval=15 (1 frame/seg)
+            real_interval = max(1, int(round(frame_interval * fps / 30.0)))
+            frames_to_process = max(1, total_frames // real_interval)
+            print(f"  [Modelo3D] fps={fps:.1f}, frame_interval_param={frame_interval}, real_interval={real_interval}, total_frames={total_frames}, to_process={frames_to_process}, duration={duration_sec:.1f}s")
+
+            yield f"event: started\ndata: {json.dumps({'total_frames': total_frames, 'frames_to_process': frames_to_process, 'fps': round(fps, 1), 'duration_sec': round(duration_sec, 1)})}\n\n"
+
+            # ── Phase 1: Extract frames with YOLO + GrabCut + torso crop ──
+            extracted_frames = []
+            extracted_masks = []
+            extracted_masks_full = []
+            extracted_bboxes = []
+            extracted_num = 0
+
+            for frame_num in range(0, total_frames, real_interval):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+                ret, frame = cap.read()
+                if not ret:
+                    extracted_num += 1
+                    continue
+
+                try:
+                    bbox = detectar_vaca(frame, cow_model, coco_model)
+                    if bbox is None:
+                        extracted_num += 1
+                        yield f"event: extracting\ndata: {json.dumps({'frame_num': frame_num, 'extracted': extracted_num, 'total': frames_to_process, 'accepted': len(extracted_frames), 'skipped': True})}\n\n"
+                        continue
+
+                    mask_full, contorno_full = segmentar(frame, bbox)
+                    if mask_full is None:
+                        extracted_num += 1
+                        yield f"event: extracting\ndata: {json.dumps({'frame_num': frame_num, 'extracted': extracted_num, 'total': frames_to_process, 'accepted': len(extracted_frames), 'skipped': True})}\n\n"
+                        continue
+
+                    mask_torso, _ = recortar_torso(mask_full, bbox)
+                    if mask_torso is None:
+                        mask_torso = mask_full
+
+                    extracted_frames.append(frame)
+                    extracted_masks.append(mask_torso)
+                    extracted_masks_full.append(mask_full)
+                    extracted_bboxes.append(bbox)
+                    extracted_num += 1
+
+                    # Thumbnail
+                    h_img, w_img = frame.shape[:2]
+                    thumb_w = 160
+                    thumb_h = int(h_img * thumb_w / w_img)
+                    thumb = cv2.resize(frame, (thumb_w, thumb_h), interpolation=cv2.INTER_AREA)
+                    _, buf = cv2.imencode('.jpg', thumb, [cv2.IMWRITE_JPEG_QUALITY, 60])
+                    thumb_b64 = base64.b64encode(buf).decode('utf-8')
+
+                    yield f"event: extracting\ndata: {json.dumps({'frame_num': frame_num, 'extracted': extracted_num, 'total': frames_to_process, 'accepted': len(extracted_frames), 'skipped': False, 'thumb_b64': thumb_b64})}\n\n"
+
+                except Exception:
+                    extracted_num += 1
+                    continue
+
+            if len(extracted_frames) < 2:
+                yield f"event: error\ndata: {json.dumps({'message': f'Solo se extrajeron {len(extracted_frames)} frames validos (minimo 2).'})}\n\n"
+                return
+
+            # ── Phase 2: 3D Reconstruction (mode-dependent) ──
+            recon_events = []
+
+            def on_recon_progress(step, total, message):
+                recon_events.append({'step': step, 'total_steps': total, 'message': message})
+
+            if mode == 'sfm':
+                sfm_result = sfm_real_desde_frames(extracted_frames, extracted_masks, cow_height_cm, bboxes=extracted_bboxes, masks_full=extracted_masks_full, on_progress=on_recon_progress)
+            elif mode == 'sfm_legacy':
+                sfm_result = sfm_desde_frames(extracted_frames, extracted_masks, cow_height_cm, bboxes=extracted_bboxes, masks_full=extracted_masks_full, on_progress=on_recon_progress)
+            else:
+                sfm_result = modelo_hibrido(extracted_frames, extracted_masks, cow_height_cm, bboxes=extracted_bboxes, masks_full=extracted_masks_full, on_progress=on_recon_progress)
+
+            # Yield all accumulated progress events
+            for evt in recon_events:
+                yield f"event: sfm_progress\ndata: {json.dumps(evt)}\n\n"
+
+            if sfm_result is None:
+                method_name = 'SfM' if mode == 'sfm' else 'Híbrido'
+                yield f"event: error\ndata: {json.dumps({'message': f'El modelo {method_name} no generó puntos 3D suficientes. Las imágenes pueden no tener suficiente variación de ángulo.'})}\n\n"
+                return
+
+            # ── Phase 3: Save PLY and emit result ──
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            output_dir = os.path.join(base_dir, 'output_modelos3d_batch', vaca_name)
+            os.makedirs(output_dir, exist_ok=True)
+
+            ply_3d_name = f"{vaca_name}_3d.ply"
+            ply_3d_path = os.path.join(output_dir, ply_3d_name)
+
+            points_3d = sfm_result['points_3d']
+            colors = sfm_result['colors']
+            triangles = sfm_result['triangles']
+
+            if len(triangles) > 0:
+                guardar_ply_con_malla(ply_3d_path, points_3d, triangles, colors)
+            else:
+                # Fallback: point cloud only (import from reconstruccion_3d)
+                from reconstruccion_3d import guardar_ply as guardar_ply_nube
+                guardar_ply_nube(ply_3d_path, points_3d, colors)
+
+            # Helper to ensure all values are JSON-safe (no numpy types)
+            def _js(v):
+                if isinstance(v, (np.integer,)):
+                    return int(v)
+                if isinstance(v, (np.floating,)):
+                    return float(v)
+                return v
+
+            # Generar imagen resumen (modelo_escalado)
+            try:
+                img_resumen_path = os.path.join(output_dir, f"{vaca_name}_modelo_escalado.png")
+                generar_imagen_resumen(sfm_result, img_resumen_path, vaca_name=vaca_name)
+            except Exception as e:
+                print(f"  [Modelo3D] Error generando imagen resumen: {e}")
+
+            # Save resumen.json
+            resumen = {
+                'vaca': vaca_name,
+                'method': mode,
+                'cow_height_cm': float(cow_height_cm),
+                'volumen_cm3': _js(sfm_result['volumen_cm3']),
+                'volumen_litros': _js(sfm_result['volumen_litros']),
+                'peso_kg': _js(sfm_result['peso_kg']),
+                'peso_barril_kg': _js(sfm_result.get('peso_barril_kg', sfm_result['peso_kg'])),
+                'alto_cm': _js(sfm_result['alto_cm']),
+                'largo_cm': _js(sfm_result['largo_cm']),
+                'ancho_cm': _js(sfm_result['ancho_cm']),
+                'superficie_cm2': _js(sfm_result['superficie_cm2']),
+                'num_points': _js(sfm_result['num_points']),
+                'num_pairs': _js(sfm_result['num_pairs']),
+                'num_triangles': _js(sfm_result['num_triangles']),
+                'frames_extracted': len(extracted_frames),
+                'scale_factor': _js(sfm_result['scale_factor']),
+            }
+            with open(os.path.join(output_dir, f"{vaca_name}_resumen.json"), 'w') as f:
+                json.dump(resumen, f, indent=2, ensure_ascii=False)
+
+            summary = {
+                'volumen_litros': _js(sfm_result['volumen_litros']),
+                'peso_kg': _js(sfm_result['peso_kg']),
+                'peso_barril_kg': _js(sfm_result.get('peso_barril_kg', sfm_result['peso_kg'])),
+                'alto_cm': _js(sfm_result['alto_cm']),
+                'largo_cm': _js(sfm_result['largo_cm']),
+                'ancho_cm': _js(sfm_result['ancho_cm']),
+                'num_points': _js(sfm_result['num_points']),
+                'num_pairs': _js(sfm_result['num_pairs']),
+                'num_triangles': _js(sfm_result['num_triangles']),
+                'frames_used': len(extracted_frames),
+                'mode': mode,
+                'ply_id': vaca_name,
+                'ply_3d': ply_3d_name,
+            }
+
+            yield f"event: complete\ndata: {json.dumps(summary)}\n\n"
+
+        except Exception as e:
+            yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
+        finally:
+            if cap:
+                cap.release()
+            try:
+                os.remove(temp_video_path)
+            except Exception:
+                pass
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',
+        }
+    )
+
 
 def to_farm():
     session.pop('facility')
     return redirect(url_for('index'))
+
+# ── 3D Model Viewer endpoints ──
+
+MODELO_GRANDES_DIR = 'output_modelos3d_grandes'
+MODELO_DESFILE_DIR = 'output_modelos3d_desfile26marz'
+MODELO_26MARZ_DIR = 'output_modelos3d_26marz'
+MODELO_RECORTE26MARZ_DIR = 'output_modelos3d_Recorte26marz_altdiag'
+ALTO_ESTIMADO_DEFAULT = 120.0  # cm fallback assumed during model generation
+
+
+def _discover_modelo_dirs():
+    """Auto-discover model subdirectories inside all model output dirs."""
+    base = os.path.dirname(os.path.abspath(__file__))
+    dirs = {}
+    for model_dir in [MODELO_RECORTE26MARZ_DIR]:
+        batch_path = os.path.join(base, model_dir)
+        if os.path.isdir(batch_path):
+            for entry in sorted(os.listdir(batch_path)):
+                if entry.startswith('_'):
+                    continue
+                full = os.path.join(batch_path, entry)
+                if os.path.isdir(full):
+                    dirs[entry] = os.path.join(model_dir, entry)
+    return dirs
+
+
+def _load_resumen(dir_path):
+    """Load the *_resumen.json from a model directory."""
+    for f in sorted(os.listdir(dir_path)):
+        if f.endswith('_resumen.json') or f == 'resumen.json':
+            with open(os.path.join(dir_path, f)) as jf:
+                return json.load(jf)
+    return {}
+
+
+@app.route('/api/modelos_disponibles')
+def modelos_disponibles():
+    modelos = []
+    base = os.path.dirname(os.path.abspath(__file__))
+    modelo_dirs = _discover_modelo_dirs()
+    for vaca, carpeta in modelo_dirs.items():
+        dir_path = os.path.join(base, carpeta)
+        if not os.path.isdir(dir_path):
+            continue
+        ply_3d = None
+        ply_lat = None
+        for f in os.listdir(dir_path):
+            if f.endswith('.ply') and '3d' in f.lower():
+                ply_3d = f
+            elif f.endswith('.ply') and 'lateral' in f.lower():
+                ply_lat = f
+        if not ply_3d and not ply_lat:
+            continue
+        meta = _load_resumen(dir_path)
+        # Support both old format (peso_kg, volumen_litros) and new (peso_real_kg, vol_total_litros)
+        peso = meta.get('peso_kg') or meta.get('peso_real_kg')
+        vol = meta.get('volumen_litros') or meta.get('vol_total_litros')
+        vol_barril = meta.get('vol_barril_litros') or meta.get('volumen_barril_litros')
+        modelos.append({
+            'id': vaca,
+            'nombre': vaca.replace('_', ' ').title(),
+            'ply_3d': ply_3d,
+            'ply_lateral': ply_lat,
+            'escala_cm_px': meta.get('escala_cm_px'),
+            'alto_estimado_cm': meta.get('altura_estimada_cm', ALTO_ESTIMADO_DEFAULT),
+            'foto_usada': meta.get('foto_usada'),
+            'fotos_validas': meta.get('fotos_validas'),
+            'peso_kg': peso,
+            'volumen_litros': vol,
+            'vol_barril_litros': vol_barril,
+            'largo_cm': meta.get('largo_cm'),
+            'alto_cm': meta.get('alto_cm'),
+            'superficie_cm2': meta.get('superficie_cm2'),
+        })
+    return jsonify(modelos)
+
+
+@app.route('/api/modelo3d/<vaca>/recalcular', methods=['POST'])
+def recalcular_volumen(vaca):
+    """Recalculate metrics using actual height instead of the assumed default.
+
+    The model was generated assuming alto_cm = resumen's alto_cm.
+    The correction factor is: new_height / original_alto_cm.
+    """
+    base = os.path.dirname(os.path.abspath(__file__))
+    modelo_dirs = _discover_modelo_dirs()
+    carpeta = modelo_dirs.get(vaca)
+    if not carpeta:
+        return jsonify({'error': 'Vaca no encontrada'}), 404
+
+    data = request.get_json(force=True)
+    altura_cm = data.get('altura_cm')
+    if not altura_cm or not isinstance(altura_cm, (int, float)) or altura_cm <= 0:
+        return jsonify({'error': 'altura_cm invalida'}), 400
+
+    dir_path = os.path.join(base, carpeta)
+    meta = _load_resumen(dir_path)
+    if not meta:
+        return jsonify({'error': 'Resumen no encontrado'}), 404
+
+    # The original alto_cm is the height the model was generated with
+    alto_original = meta.get('alto_cm', ALTO_ESTIMADO_DEFAULT)
+    if alto_original <= 0:
+        alto_original = ALTO_ESTIMADO_DEFAULT
+
+    # Factor de corrección: altura real / altura con la que se generó
+    factor = altura_cm / alto_original
+    factor2 = factor ** 2
+    factor3 = factor ** 3
+
+    volumen_litros = round(meta.get('volumen_litros', meta.get('volumen_cm3', 0) / 1000) * factor3, 1)
+    peso_kg = round(volumen_litros * 1.03, 1)
+
+    return jsonify({
+        'id': vaca,
+        'altura_cm': round(altura_cm, 1),
+        'largo_cm': round(meta.get('largo_cm', 0) * factor, 1),
+        'alto_cm': round(alto_original * factor, 1),
+        'area_lateral_cm2': round(meta.get('area_lateral_cm2', 0) * factor2, 1),
+        'volumen_cm3': round(meta.get('volumen_cm3', 0) * factor3, 1),
+        'volumen_litros': volumen_litros,
+        'superficie_cm2': round(meta.get('superficie_cm2', 0) * factor2, 1),
+        'peso_kg': peso_kg,
+    })
+
+
+@app.route('/api/altura_estimada')
+def altura_estimada():
+    """Return estimated bbox height for category + age combination."""
+    category = request.args.get('category', 'desconocido')
+    age_range = request.args.get('age_range', 'desconocido')
+    altura = get_estimated_height(category, age_range)
+    return jsonify({'altura_cm': altura, 'category': category, 'age_range': age_range})
+
+
+@app.route('/api/alturas_tabla')
+def alturas_tabla():
+    """Return the full height table for the UI."""
+    return jsonify(HEIGHT_BY_CATEGORY_AGE)
+
+
+@app.route('/api/modelo3d/<vaca>/<archivo>')
+def get_modelo_3d(vaca, archivo):
+    base = os.path.dirname(os.path.abspath(__file__))
+    modelo_dirs = _discover_modelo_dirs()
+    carpeta = modelo_dirs.get(vaca)
+    if not carpeta:
+        return jsonify({'error': 'Vaca no encontrada'}), 404
+    safe_archivo = secure_filename(archivo)
+    filepath = os.path.join(base, carpeta, safe_archivo)
+    if not os.path.isfile(filepath) or not safe_archivo.endswith('.ply'):
+        return jsonify({'error': 'Archivo PLY no encontrado'}), 404
+    from flask import send_file
+    return send_file(filepath, mimetype='application/octet-stream')
+
 
 # start the server with the 'run()' method
 if __name__ == '__main__':

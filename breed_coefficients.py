@@ -98,6 +98,115 @@ AGE_OPTIONS = [
 ]
 
 
+# ── Weight ranges per category (kg) ──────────────────────────────
+# Used by batch screening to flag outliers.
+# Source: INTA / Argentine cattle production references.
+WEIGHT_RANGES = {
+    "ternero":     (50, 180),
+    "ternera":     (50, 180),
+    "recria":      (120, 250),
+    "vaquillona":  (170, 350),
+    "novillito":   (180, 400),
+    "novillo":     (300, 550),
+    "vaca":        (300, 600),
+    "toro":        (400, 900),
+    "desconocido": (100, 700),
+}
+
+
+# ── Estimated bbox height by category × age (cm) ─────────────────
+# Approximate YOLO bounding-box height for Angus/Hereford cattle.
+# Not shoulder height — includes head up and legs down as seen by YOLO.
+# Source: field observations + INTA morphometric references.
+# Used as default scale when no calibration posts are available.
+HEIGHT_BY_CATEGORY_AGE = {
+    "ternero": {
+        "0-6":   70,
+        "6-12":  85,
+        "12-18": 95,
+        "18-24": 100,
+        "24-36": 105,
+        "36+":   105,
+    },
+    "ternera": {
+        "0-6":   68,
+        "6-12":  83,
+        "12-18": 92,
+        "18-24": 97,
+        "24-36": 100,
+        "36+":   100,
+    },
+    "recria": {
+        "0-6":   75,
+        "6-12":  88,
+        "12-18": 98,
+        "18-24": 105,
+        "24-36": 110,
+        "36+":   110,
+    },
+    "vaquillona": {
+        "0-6":   75,
+        "6-12":  90,
+        "12-18": 100,
+        "18-24": 108,
+        "24-36": 115,
+        "36+":   118,
+    },
+    "novillito": {
+        "0-6":   78,
+        "6-12":  92,
+        "12-18": 105,
+        "18-24": 112,
+        "24-36": 118,
+        "36+":   120,
+    },
+    "novillo": {
+        "0-6":   80,
+        "6-12":  95,
+        "12-18": 108,
+        "18-24": 118,
+        "24-36": 125,
+        "36+":   130,
+    },
+    "vaca": {
+        "0-6":   80,
+        "6-12":  95,
+        "12-18": 105,
+        "18-24": 112,
+        "24-36": 120,
+        "36+":   125,
+    },
+    "toro": {
+        "0-6":   85,
+        "6-12":  100,
+        "12-18": 115,
+        "18-24": 125,
+        "24-36": 135,
+        "36+":   145,
+    },
+}
+
+
+def get_estimated_height(category="desconocido", age_range="desconocido"):
+    """Return estimated bbox height in cm for the given category and age.
+
+    Falls back to 120 cm (generic adult) if category/age not found.
+    """
+    cat = category.lower().strip()
+    age = age_range.lower().strip()
+    cat_heights = HEIGHT_BY_CATEGORY_AGE.get(cat)
+    if cat_heights:
+        return cat_heights.get(age, cat_heights.get("24-36", 120))
+    # desconocido: use novillo as reference
+    novillo = HEIGHT_BY_CATEGORY_AGE.get("novillo", {})
+    return novillo.get(age, 120)
+
+
+def get_weight_range(category="desconocido"):
+    """Return (min_kg, max_kg) for the given category."""
+    return WEIGHT_RANGES.get(category.lower().strip(), WEIGHT_RANGES["desconocido"])
+
+
 def get_weight_multiplier(breed="desconocido", category="desconocido", age_range="desconocido"):
     """Return the combined correction multiplier K_breed * K_category * K_age.
 

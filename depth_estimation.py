@@ -4,7 +4,7 @@ Estimación de profundidad y escala usando postes de referencia.
 Clase principal: DepthEstimator
   - Detecta postes rojos en la imagen usando YOLO (sticker.pt) y fallback por color HSV
   - Mide la altura en píxeles del tramo rojo de cada poste
-  - Calcula la escala cm/px usando la altura real conocida (por defecto 122 cm)
+  - Calcula la escala cm/px usando la altura real conocida (por defecto 50 cm)
   - Opcionalmente calcula profundidad relativa animal-postes con triangulación
 
 Dependencias: ultralytics, opencv-python, numpy
@@ -25,7 +25,7 @@ class DepthEstimator:
     """
     
     def __init__(self, sticker_model_path="models_yolo/sticker.pt",
-                 poste1_height_cm=100, poste2_height_cm=100,
+                 poste1_height_cm=50, poste2_height_cm=50,
                  distancia_postes_cm=200, focal_length_px=None,
                  conf_threshold=0.25, iou_threshold=0.45,
                  yellow_ratio_threshold=0.08, yellow_ratio_threshold_high=0.18,
@@ -54,16 +54,16 @@ class DepthEstimator:
         self.yellow_ratio_threshold_high = yellow_ratio_threshold_high
         self.yellow_global_threshold = yellow_global_threshold
 
-        # Rangos HSV para rojo (dos bandas). Más tolerantes para sombra.
-        # Nota: mantenemos el nombre "yellow" por compatibilidad con el resto del código.
-        self._red_hsv_lower1 = np.array([0, 60, 40])
-        self._red_hsv_upper1 = np.array([15, 255, 255])
-        self._red_hsv_lower2 = np.array([165, 60, 40])
+        # Rangos HSV para rojo (dos bandas).
+        # Saturación >= 80 para excluir suelo/tierra que es rojo desaturado.
+        self._red_hsv_lower1 = np.array([0, 80, 40])
+        self._red_hsv_upper1 = np.array([10, 255, 255])
+        self._red_hsv_lower2 = np.array([170, 80, 40])
         self._red_hsv_upper2 = np.array([180, 255, 255])
 
-        # HSV del pasto para excluirlo (evita falsos positivos en verde)
-        self._grass_hsv_lower = np.array([21, 38, 123])
-        self._grass_hsv_upper = np.array([30, 115, 255])
+        # HSV del pasto/tierra para excluirlo
+        self._grass_hsv_lower = np.array([11, 0, 0])
+        self._grass_hsv_upper = np.array([30, 255, 255])
     
     @staticmethod
     def euclidean(pt1, pt2):
@@ -130,10 +130,11 @@ class DepthEstimator:
         """
         postes = []
 
-        # 1) Intentar YOLO si está disponible
+        # 1) Intentar YOLO si está disponible (usar conf bajo para no perder postes lejanos)
         results = None
+        _sticker_conf = min(self.conf_threshold, 0.10)
         if self.sticker_model is not None:
-            results = self.sticker_model(image, save=False, conf=self.conf_threshold, iou=self.iou_threshold)
+            results = self.sticker_model(image, save=False, conf=_sticker_conf, iou=self.iou_threshold)
 
         # Detectar cuánto rojo hay en la imagen completa para ajustar umbral
         hsv_full = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
@@ -149,8 +150,8 @@ class DepthEstimator:
         global_red_ratio = float(np.mean(red_mask_full > 0))
         # Umbral más permisivo: usar el umbral bajo por defecto, solo usar el alto si hay MUCHO rojo en la imagen
         yellow_ratio_threshold = self.yellow_ratio_threshold_high if global_red_ratio > self.yellow_global_threshold * 2 else self.yellow_ratio_threshold
-        # Reducir aún más el umbral mínimo para detectar bandas rojas pequeñas pero puras
-        yellow_ratio_threshold = max(0.03, yellow_ratio_threshold * 0.6)  # Mínimo 3% de rojo, o 60% del umbral original
+        # Reducir umbral para detectar bandas rojas pequeñas pero puras
+        yellow_ratio_threshold = max(0.01, yellow_ratio_threshold * 0.4)  # Mínimo 1% de rojo, o 40% del umbral original
 
         if results is not None:
             for result in results:
@@ -184,16 +185,31 @@ class DepthEstimator:
                         bbox_ratio = bbox_area / img_area if img_area > 0 else 0
 
                         adjusted_threshold = yellow_ratio_threshold
-                        if score > 0.5 and bbox_ratio < 0.1:
-                            adjusted_threshold = yellow_ratio_threshold * 0.5
+                        if score > 0.3 and bbox_ratio < 0.15:
+                            adjusted_threshold = yellow_ratio_threshold * 0.3
+
+                        # Validar aspect ratio: cintas verticales deben ser al menos 6x más altas que anchas
+                        bw = x2 - x1
+                        bh = y2 - y1
+                        aspect = float(bh) / float(max(1, bw))
+                        if aspect < 3.5:
+                            print(
+                                f"[DEPTH] Poste YOLO rechazado por aspect ratio: "
+                                f"bbox={[x1, y1, x2, y2]} score={score:.3f} aspect={aspect:.2f} < 3.5"
+                            )
+                            continue
 
                         if red_ratio < adjusted_threshold:
-                            if red_ratio > adjusted_threshold * 0.7:
-                                print(
-                                    f"[DEPTH] Poste YOLO rechazado por rojo: "
-                                    f"bbox={[x1, y1, x2, y2]} score={score:.3f} red_ratio={red_ratio:.3f} threshold={adjusted_threshold:.3f}"
-                                )
+                            print(
+                                f"[DEPTH] Poste YOLO rechazado por rojo: "
+                                f"bbox={[x1, y1, x2, y2]} score={score:.3f} red_ratio={red_ratio:.3f} threshold={adjusted_threshold:.3f}"
+                            )
                             continue
+                        else:
+                            print(
+                                f"[DEPTH] Poste YOLO aceptado: "
+                                f"bbox={[x1, y1, x2, y2]} score={score:.3f} red_ratio={red_ratio:.3f} aspect={aspect:.1f} threshold={adjusted_threshold:.3f}"
+                            )
 
                         postes.append({
                             'bbox': [float(x1), float(y1), float(x2), float(y2)],
@@ -201,14 +217,20 @@ class DepthEstimator:
                             'yellow_ratio': red_ratio  # Mantener nombre por compatibilidad
                         })
 
+        _n_yolo = len(postes)
+        print(f"[DEPTH] detect_postes_all: YOLO found {_n_yolo} postes (conf>={_sticker_conf if self.sticker_model else 'N/A'})")
+
         # 2) Fallback por color (especialmente útil cuando YOLO falla o no existe)
         # Si YOLO ya detectó suficientes, aún añadimos color pero con NMS para evitar duplicados.
         postes_color = self._detect_postes_by_color(image)
+        print(f"[DEPTH] detect_postes_all: color fallback found {len(postes_color)} postes")
         if postes_color:
             postes.extend(postes_color)
 
         # 3) Deduplicar con NMS/IoU simple
+        _n_before_nms = len(postes)
         postes = self._nms_postes(postes, iou_threshold=0.35)
+        print(f"[DEPTH] detect_postes_all: after NMS {_n_before_nms} -> {len(postes)} postes")
         postes.sort(key=lambda p: (p.get('score', 0.0), p.get('yellow_ratio', 0.0)), reverse=True)
         return postes
 
@@ -238,24 +260,42 @@ class DepthEstimator:
 
         contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
+            print(f"[DEPTH] color_fallback: no red contours found in {w}x{h} image")
             return []
 
         img_area = float(h * w)
-        min_height = max(40, int(h * 0.18))
-        min_area = max(600.0, img_area * 0.0008)  # ~0.08% del área
+        min_height = max(15, int(h * 0.03))  # Allow smaller/distant posts
+        min_area = max(50.0, img_area * 0.00008)  # Lowered to catch thin posts (area ~80-96px²)
 
+        print(f"[DEPTH] color_fallback: {len(contours)} red contours found, min_height={min_height}px min_area={min_area:.0f}px²")
         postes = []
         for cnt in contours:
             area = float(cv2.contourArea(cnt))
             if area < min_area:
+                x, y, bw, bh = cv2.boundingRect(cnt)
+                print(f"[DEPTH] color_fallback: REJECTED area too small: bbox=[{x},{y},{x+bw},{y+bh}] area={area:.0f} < {min_area:.0f}")
                 continue
 
             x, y, bw, bh = cv2.boundingRect(cnt)
             if bh < min_height or bw <= 0:
+                print(f"[DEPTH] color_fallback: REJECTED height too small: bbox=[{x},{y},{x+bw},{y+bh}] bh={bh} < {min_height}")
                 continue
 
             aspect = float(bh) / float(max(1, bw))
-            if aspect < 1.6:
+            if aspect < 3.5:  # Cintas verticales: al menos 3.5x más altas que anchas
+                print(f"[DEPTH] color_fallback: REJECTED aspect ratio: bbox=[{x},{y},{x+bw},{y+bh}] aspect={aspect:.2f} < 3.5")
+                continue
+
+            # Rechazar si es demasiado ancho (no puede ser una cinta)
+            max_width_pct = 0.15  # máximo 15% del ancho de la imagen
+            if bw > w * max_width_pct:
+                print(f"[DEPTH] color_fallback: REJECTED too wide: bbox=[{x},{y},{x+bw},{y+bh}] bw={bw} > {w*max_width_pct:.0f}")
+                continue
+
+            # Rechazar si toca los bordes de la imagen (probablemente no es un poste completo)
+            border_margin = 3
+            if x <= border_margin or y <= border_margin or x + bw >= w - border_margin or y + bh >= h - border_margin:
+                print(f"[DEPTH] color_fallback: REJECTED touches border: bbox=[{x},{y},{x+bw},{y+bh}]")
                 continue
 
             x1, y1, x2, y2 = int(x), int(y), int(x + bw), int(y + bh)
@@ -272,12 +312,14 @@ class DepthEstimator:
             # Para postes con tira roja fina, el ratio puede ser bajo si bbox captura parte negra.
             # Aceptar ratios modestos si el candidato es alto y angosto.
             if red_ratio < 0.04 and aspect < 3.0:
+                print(f"[DEPTH] color_fallback: REJECTED low red_ratio: bbox=[{x1},{y1},{x2},{y2}] red_ratio={red_ratio:.3f} aspect={aspect:.2f}")
                 continue
 
             area_ratio = (float((x2 - x1) * (y2 - y1)) / max(1.0, img_area))
             # Score heurístico (0-1): mezcla de "rojez" y tamaño relativo.
             score = float(np.clip(0.75 * red_ratio + 0.25 * min(1.0, area_ratio * 6.0), 0.0, 1.0))
 
+            print(f"[DEPTH] color_fallback: ACCEPTED bbox=[{x1},{y1},{x2},{y2}] red_ratio={red_ratio:.3f} aspect={aspect:.2f} score={score:.3f}")
             postes.append({
                 'bbox': [float(x1), float(y1), float(x2), float(y2)],
                 'score': score,

@@ -9,13 +9,19 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 // ── State ──
 
 let scene, camera, renderer, controls;
+// Shell / contorno (superficie exterior)
 let currentMesh = null;
 let currentPoints = null;
 let currentWireframe = null;
+// Volumen / rebanadas
+let volumenMesh = null;
+let volumenWireframe = null;
 let modelosData = [];
 let currentModelId = null; // ID of currently loaded model (e.g. 'vaca1')
 let renderMode = 'solid'; // solid | wireframe | points
+let layerMode = 'contorno'; // contorno | volumen | ambos
 let animFrameId = null;
+let _pendingLoads = 0;  // contador de cargas en vuelo → pausa render durante carga
 
 // ── Init ──
 
@@ -33,10 +39,16 @@ function initViewer3D() {
     camera = new THREE.PerspectiveCamera(45, aspect, 0.1, 10000);
     camera.position.set(0, 100, 300);
 
-    // Renderer
-    renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+    // Renderer — alpha:false (opaco), antialias:false y pixelRatio=1 para rendimiento
+    renderer = new THREE.WebGLRenderer({
+        canvas: canvas,
+        antialias: false,       // antes true, baja bastante el costo
+        alpha: false,
+        powerPreference: 'high-performance',
+    });
     renderer.setSize(container.clientWidth, container.clientHeight);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setPixelRatio(1);  // antes window.devicePixelRatio → pesado en Retina
+    renderer.setClearColor(0xf5f5f5, 1);
 
     // Lights
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
@@ -54,24 +66,32 @@ function initViewer3D() {
     const grid = new THREE.GridHelper(500, 20, 0xcccccc, 0xe0e0e0);
     scene.add(grid);
 
-    // OrbitControls
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
     controls.minDistance = 10;
     controls.maxDistance = 2000;
 
-    // Resize handler
-    const resizeObserver = new ResizeObserver(() => {
+    // Resize debounced con check de dimensiones (evita setSize excesivo)
+    let _lastW = 0, _lastH = 0;
+    let _resizeTimeout = null;
+    function _doResize() {
         const w = container.clientWidth;
         const h = container.clientHeight;
+        if (w === _lastW && h === _lastH) return;
+        if (w <= 0 || h <= 0) return;
+        _lastW = w;
+        _lastH = h;
         camera.aspect = w / h;
         camera.updateProjectionMatrix();
-        renderer.setSize(w, h);
+        renderer.setSize(w, h, false);
+    }
+    const resizeObserver = new ResizeObserver(() => {
+        if (_resizeTimeout) clearTimeout(_resizeTimeout);
+        _resizeTimeout = setTimeout(_doResize, 120);
     });
     resizeObserver.observe(container);
 
-    // Animate loop
     function animate() {
         animFrameId = requestAnimationFrame(animate);
         controls.update();
@@ -92,11 +112,19 @@ async function loadModelosDisponibles(selectModelId) {
         const sel = document.getElementById('modelSelector');
         if (!sel) return;
         sel.innerHTML = '';
-        if (modelosData.length === 0) {
-            sel.innerHTML = '<option value="">No hay modelos disponibles</option>';
-            return;
-        }
-        let targetIdx = 0;
+
+        // Opción placeholder default (no muestra ningún modelo)
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = modelosData.length === 0
+            ? 'No hay modelos disponibles'
+            : '-- Seleccioná un modelo --';
+        placeholder.disabled = modelosData.length === 0;
+        sel.appendChild(placeholder);
+
+        if (modelosData.length === 0) return;
+
+        let targetIdx = -1;
         modelosData.forEach((m, i) => {
             const opt = document.createElement('option');
             opt.value = i;
@@ -106,10 +134,15 @@ async function loadModelosDisponibles(selectModelId) {
                 targetIdx = i;
             }
         });
-        sel.value = targetIdx;
-        // Only auto-load if no external model was just loaded
-        if (!selectModelId) {
+
+        // Solo auto-cargar si VINO un modelo específico por parámetro
+        // (ej. recién generado desde "Generar modelo 3D"). Sino, queda en placeholder.
+        if (selectModelId && targetIdx >= 0) {
+            sel.value = targetIdx;
             loadModelByIndex(targetIdx);
+        } else {
+            sel.value = '';
+            clearModel();  // limpia cualquier modelo previo
         }
     } catch (e) {
         console.error('Error loading modelos disponibles:', e);
@@ -122,16 +155,27 @@ function loadModelByIndex(idx) {
     const m = modelosData[idx];
     if (!m) return;
 
-    // Prefer 3D PLY, fallback to lateral
-    const archivo = m.ply_3d || m.ply_lateral;
-    if (!archivo) return;
+    const shellFile = m.ply_3d || m.ply_lateral;
+    if (!shellFile) return;
 
     currentModelId = m.id;
-    const url = `/api/modelo3d/${m.id}/${archivo}`;
-    loadModelo(url);
+    _pendingLoads++;
+    clearModel();
+    // Cache-bust: asegura recarga del PLY cuando se regenera (el PLYLoader
+    // cachea por URL — sin esto el viewer mostraría el modelo viejo aunque
+    // el archivo en disco sea nuevo).
+    const _t = Date.now();
+    loadShellPLY(`/api/modelo3d/${m.id}/${shellFile}?t=${_t}`, function() {
+        _pendingLoads--;
+    });
+    if (m.ply_volumen) {
+        _pendingLoads++;
+        loadVolumenPLY(`/api/modelo3d/${m.id}/${m.ply_volumen}?t=${_t}`, function() {
+            _pendingLoads--;
+        });
+    }
     updateInfoPanel(m);
 
-    // Pre-fill height input if we have alto_cm from the model's default scale
     const heightInput = document.getElementById('inputAlturaCm');
     if (heightInput) heightInput.value = '';
 }
@@ -139,15 +183,18 @@ function loadModelByIndex(idx) {
 // ── Load PLY model ──
 
 function loadModelo(url) {
-    // Show loader
+    // Back-compat: single-arg loader used by external code (loads as shell)
+    clearModel();
+    loadShellPLY(url);
+}
+
+function loadShellPLY(url, onDone) {
     const loader3d = document.getElementById('viewer3dLoader');
     if (loader3d) loader3d.style.display = 'flex';
 
-    // Remove previous objects
-    clearModel();
-
     const loader = new PLYLoader();
     loader.load(url, function(geometry) {
+        try {
         geometry.computeVertexNormals();
 
         // Center geometry
@@ -209,11 +256,59 @@ function loadModelo(url) {
 
         // Hide loader
         if (loader3d) loader3d.style.display = 'none';
+        } finally {
+            if (typeof onDone === 'function') onDone();
+        }
     },
     undefined,
     function(error) {
         console.error('Error loading PLY:', error);
         if (loader3d) loader3d.style.display = 'none';
+        if (typeof onDone === 'function') onDone();
+    });
+}
+
+function loadVolumenPLY(url, onDone) {
+    const loader = new PLYLoader();
+    loader.load(url, function(geometry) {
+        try {
+        geometry.computeVertexNormals();
+        geometry.computeBoundingBox();
+        const center = new THREE.Vector3();
+        geometry.boundingBox.getCenter(center);
+        geometry.translate(-center.x, -center.y, -center.z);
+
+        const hasColors = geometry.hasAttribute('color');
+
+        const solidMat = new THREE.MeshPhongMaterial({
+            color: hasColors ? 0xffffff : 0xe68a2e,
+            vertexColors: hasColors,
+            side: THREE.DoubleSide,
+            shininess: 15,
+            transparent: true,
+            opacity: 0.92,
+        });
+        volumenMesh = new THREE.Mesh(geometry, solidMat);
+        scene.add(volumenMesh);
+
+        const wireMat = new THREE.MeshBasicMaterial({
+            color: 0xcc6a16,
+            wireframe: true,
+            transparent: true,
+            opacity: 0.85,
+        });
+        volumenWireframe = new THREE.Mesh(geometry, wireMat);
+        scene.add(volumenWireframe);
+
+        applyLayerMode();
+        } finally {
+            if (typeof onDone === 'function') onDone();
+        }
+    },
+    undefined,
+    function(error) {
+        console.error('Error loading volumen PLY:', error);
+        if (typeof onDone === 'function') onDone();
     });
 }
 
@@ -223,6 +318,8 @@ function clearModel() {
     if (currentMesh) { scene.remove(currentMesh); currentMesh = null; }
     if (currentWireframe) { scene.remove(currentWireframe); currentWireframe = null; }
     if (currentPoints) { scene.remove(currentPoints); currentPoints = null; }
+    if (volumenMesh) { scene.remove(volumenMesh); volumenMesh = null; }
+    if (volumenWireframe) { scene.remove(volumenWireframe); volumenWireframe = null; }
 }
 
 // ── Fit camera to bounding box ──
@@ -245,9 +342,34 @@ function fitCameraToModel(geometry) {
 // ── Render mode switching ──
 
 function applyRenderMode() {
-    if (currentMesh) currentMesh.visible = (renderMode === 'solid');
-    if (currentWireframe) currentWireframe.visible = (renderMode === 'wireframe');
-    if (currentPoints) currentPoints.visible = (renderMode === 'points');
+    applyLayerMode();
+}
+
+function applyLayerMode() {
+    const showShell = (layerMode === 'contorno' || layerMode === 'ambos');
+    const showVol   = (layerMode === 'volumen'  || layerMode === 'ambos');
+
+    // Shell: respeta renderMode
+    if (currentMesh)      currentMesh.visible      = showShell && (renderMode === 'solid');
+    if (currentWireframe) currentWireframe.visible = showShell && (renderMode === 'wireframe');
+    if (currentPoints)    currentPoints.visible    = showShell && (renderMode === 'points');
+
+    // En "ambos": shell semi-transparente para ver las rebanadas adentro
+    if (currentMesh && currentMesh.material) {
+        const mat = currentMesh.material;
+        if (layerMode === 'ambos') {
+            mat.transparent = true;
+            mat.opacity = 0.25;
+        } else {
+            mat.transparent = false;
+            mat.opacity = 1.0;
+        }
+        mat.needsUpdate = true;
+    }
+
+    // Volumen: solid o wireframe (no soporta points)
+    if (volumenMesh) volumenMesh.visible = showVol && (renderMode !== 'wireframe');
+    if (volumenWireframe) volumenWireframe.visible = showVol && (renderMode === 'wireframe');
 }
 
 // ── Set camera view ──
@@ -339,6 +461,9 @@ async function recalcularConAltura() {
     }
 }
 
+// Expuesta para que engine.js pueda refrescar la lista tras generar modelos en vivo
+window.loadModelosDisponibles = loadModelosDisponibles;
+
 window.viewer3dLoadModel = function(url, infoData, modelId) {
     // Ensure viewer is initialized
     if (!renderer) {
@@ -375,7 +500,12 @@ document.addEventListener('DOMContentLoaded', function() {
     const sel = document.getElementById('modelSelector');
     if (sel) {
         sel.addEventListener('change', function() {
-            const idx = parseInt(this.value);
+            const val = this.value;
+            if (val === '' || val == null) {
+                clearModel();  // placeholder seleccionado → vaciar el viewer
+                return;
+            }
+            const idx = parseInt(val);
             if (!isNaN(idx)) loadModelByIndex(idx);
         });
     }
@@ -396,6 +526,16 @@ document.addEventListener('DOMContentLoaded', function() {
             this.classList.add('active');
             renderMode = this.dataset.mode;
             applyRenderMode();
+        });
+    });
+
+    // Layer buttons (Contorno / Volumen / Ambos)
+    document.querySelectorAll('.btn-layer').forEach(btn => {
+        btn.addEventListener('click', function() {
+            document.querySelectorAll('.btn-layer').forEach(b => b.classList.remove('active'));
+            this.classList.add('active');
+            layerMode = this.dataset.layer;
+            applyLayerMode();
         });
     });
 

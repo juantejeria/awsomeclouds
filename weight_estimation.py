@@ -27,6 +27,197 @@ except ImportError:
     DEPTH_ESTIMATOR_AVAILABLE = False
     DepthEstimator = None
 
+
+# ── Helpers para dibujar cinta roja + detección de piso (pasto) ──
+# Saturación/Valor bajos para aceptar cintas pálidas/con sombra
+_RED_HSV_LOWER1 = np.array([0, 40, 30])
+_RED_HSV_UPPER1 = np.array([18, 255, 255])
+_RED_HSV_LOWER2 = np.array([160, 40, 30])
+_RED_HSV_UPPER2 = np.array([180, 255, 255])
+_FLOOR_GREEN_LOWER = np.array([20, 25, 40])
+_FLOOR_GREEN_UPPER = np.array([95, 255, 255])
+_EXCLUDE_GRASS_FROM_RED_LOWER = np.array([21, 38, 123])
+_EXCLUDE_GRASS_FROM_RED_UPPER = np.array([30, 115, 255])
+
+
+def _find_red_tape_rows(roi_bgr):
+    """Dentro del ROI del bbox del poste, busca el tramo vertical rojo continuo
+    empezando desde abajo. Retorna (y_top, y_bottom) relativos al ROI, o None.
+    """
+    if roi_bgr.size == 0:
+        return None
+    hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
+    red1 = cv2.inRange(hsv, _RED_HSV_LOWER1, _RED_HSV_UPPER1)
+    red2 = cv2.inRange(hsv, _RED_HSV_LOWER2, _RED_HSV_UPPER2)
+    red = cv2.bitwise_or(red1, red2)
+    grass = cv2.inRange(hsv, _EXCLUDE_GRASS_FROM_RED_LOWER, _EXCLUDE_GRASS_FROM_RED_UPPER)
+    red = cv2.bitwise_and(red, cv2.bitwise_not(grass))
+    red = cv2.morphologyEx(red, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8), iterations=1)
+
+    # Para bbox estrechos (10-20 px), usar casi todo el ancho. Para anchos
+    # usar solo el centro (evita confundir con objetos laterales).
+    w_roi = red.shape[1]
+    if w_roi <= 20:
+        col_start, col_end = 0, w_roi
+    else:
+        col_start = int(w_roi * 0.25)
+        col_end = int(w_roi * 0.75)
+    center = red[:, col_start:col_end]
+    row_ratio = np.mean(center > 0, axis=1)
+    rows_with_red = np.where(row_ratio >= 0.15)[0]
+    if rows_with_red.size == 0:
+        return None
+
+    y_bottom = int(rows_with_red.max())
+    y_top = y_bottom
+    min_gap = 4
+    gap = 0
+    for row in range(y_bottom, -1, -1):
+        if row_ratio[row] >= 0.2:
+            y_top = row
+            gap = 0
+        else:
+            gap += 1
+            if gap >= min_gap:
+                break
+    return y_top, y_bottom
+
+
+def _detect_floor_below(image_bgr, x_center, y_start, _unused_fallback=None):
+    """Detecta el piso usando AUTO-CALIBRACIÓN desde la propia imagen.
+
+    1. Muestreo color del PASTO en el fondo de la imagen (últimas ~30 filas)
+    2. Muestreo color del POSTE justo debajo de la cinta
+    3. Camino recto hacia abajo en x=cx
+    4. En cada fila comparo pixel vs ambos samples (LAB):
+       - Más cerca del poste → sigue siendo poste
+       - Más cerca del pasto → pasto
+    5. Primera fila donde "pasto gana" por N consecutivas → piso
+
+    Retorna (floor_y, confianza). Si no encuentra, (h_img-1, 0.0).
+    """
+    h_img, w_img = image_bgr.shape[:2]
+    y_start = max(0, min(y_start, h_img - 2))
+    if y_start >= h_img - 2:
+        return h_img - 1, 0.0
+
+    cx = int(x_center)
+    cx = max(0, min(cx, w_img - 1))
+
+    lab = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB).astype(np.int16)
+
+    # ── Muestra de POSTE: 15 filas debajo de la cinta, ±3 px de cx ──
+    ps_y0 = min(h_img - 1, y_start + 2)
+    ps_y1 = min(h_img, ps_y0 + 15)
+    ps_x0 = max(0, cx - 3)
+    ps_x1 = min(w_img, cx + 4)
+    post_sample = lab[ps_y0:ps_y1, ps_x0:ps_x1]
+    if post_sample.size == 0:
+        return h_img - 1, 0.0
+    post_lab = np.median(post_sample.reshape(-1, 3), axis=0).astype(np.int16)
+
+    # ── Muestra de PASTO: últimas 30 filas de la imagen, todo el ancho alrededor del poste ──
+    gs_half = 80
+    gs_x0 = max(0, cx - gs_half)
+    gs_x1 = min(w_img, cx + gs_half + 1)
+    gs_y0 = max(0, h_img - 30)
+    gs_y1 = h_img
+    grass_sample = lab[gs_y0:gs_y1, gs_x0:gs_x1]
+    if grass_sample.size == 0:
+        return h_img - 1, 0.0
+    grass_lab = np.median(grass_sample.reshape(-1, 3), axis=0).astype(np.int16)
+
+    # Si los samples son muy parecidos (poste y pasto casi iguales), fallback
+    sep_dist = float(np.linalg.norm(post_lab - grass_lab))
+    if sep_dist < 10:
+        # No distinguibles: fallback al fondo
+        return h_img - 1, 0.0
+
+    # ── Caminar hacia abajo en x=cx, columna ±2 px ──
+    scan_y0 = ps_y1
+    col_half = 2
+    cx0 = max(0, cx - col_half)
+    cx1 = min(w_img, cx + col_half + 1)
+
+    # Scan pre-computado para poder analizar TODA la secuencia y elegir la
+    # primera transición real (no la primera zona 100% estable)
+    row_grass_ratio = np.zeros(h_img - scan_y0, dtype=np.float32)
+    for i, row in enumerate(range(scan_y0, h_img)):
+        col_lab = lab[row, cx0:cx1]
+        d_post = np.linalg.norm(col_lab - post_lab, axis=1)
+        d_grass = np.linalg.norm(col_lab - grass_lab, axis=1)
+        row_grass_ratio[i] = float(np.mean(d_grass < d_post))
+
+    # Buscamos la primera fila donde:
+    #   - la fila actual tiene >= 40% pasto (transición iniciada)
+    #   - en las próximas 10 filas, >= 50% son >= 40% pasto (es real, no ruido)
+    persist_window = 10
+    persist_frac = 0.5
+    min_ratio = 0.4
+
+    for i in range(len(row_grass_ratio)):
+        if row_grass_ratio[i] < min_ratio:
+            continue
+        window = row_grass_ratio[i:i + persist_window]
+        if len(window) < 3:
+            continue
+        passing = np.mean(window >= min_ratio)
+        if passing >= persist_frac:
+            return int(scan_y0 + i), float(row_grass_ratio[i])
+
+    return h_img - 1, 0.0
+
+
+def _draw_tape_and_floor_on(image_rgb, bbox):
+    """Sobre image_rgb (RGB), dibuja la cinta roja detectada dentro del bbox
+    y la línea de piso (pasto) debajo. Retorna {cx, top_tape, bottom_tape, floor, tape_px}
+    o None si no se pudo detectar la cinta.
+    """
+    x1, y1, x2, y2 = map(int, bbox)
+    h_img, w_img = image_rgb.shape[:2]
+    x1 = max(0, min(x1, w_img - 1))
+    x2 = max(0, min(x2, w_img))
+    y1 = max(0, min(y1, h_img - 1))
+    y2 = max(0, min(y2, h_img))
+    if x2 <= x1 or y2 <= y1:
+        return None
+
+    # image_rgb es RGB. Para HSV necesitamos BGR o RGB → convertimos el ROI.
+    roi_rgb = image_rgb[y1:y2, x1:x2]
+    roi_bgr = cv2.cvtColor(roi_rgb, cv2.COLOR_RGB2BGR)
+    tape = _find_red_tape_rows(roi_bgr)
+    cx = (x1 + x2) // 2
+    if tape is None:
+        return None
+    y_top_rel, y_bot_rel = tape
+    line_y1 = y1 + y_top_rel
+    line_y2 = y1 + y_bot_rel
+
+    # Línea roja central de la cinta
+    red_color = (255, 0, 0)  # RGB rojo
+    cv2.line(image_rgb, (cx, line_y1), (cx, line_y2), red_color, 1)
+    cv2.circle(image_rgb, (cx, line_y1), 2, red_color, -1)
+    cv2.circle(image_rgb, (cx, line_y2), 2, red_color, -1)
+
+    # Nuevo setup: franja roja llega hasta el piso → floor = bottom_tape
+    floor_y = line_y2
+
+    # Línea horizontal de piso (coincide con bottom_tape)
+    floor_color = (0, 255, 255)  # RGB cyan
+    half_w = max(30, (x2 - x1))
+    cv2.line(image_rgb, (cx - half_w, floor_y), (cx + half_w, floor_y), floor_color, 1)
+    cv2.putText(image_rgb, "piso",
+                (cx + half_w + 5, floor_y + 5),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, floor_color, 2)
+
+    return {
+        'cx': cx,
+        'top_tape': line_y1,
+        'bottom_tape': line_y2,
+        'floor': floor_y,
+        'tape_px': abs(line_y2 - line_y1),
+    }
+
 try:
     from transformers import pipeline as hf_pipeline
     HF_DEPTH_AVAILABLE = True
@@ -730,6 +921,10 @@ class WeightEstimator:
             lbl = f"Vaca {cow['index']+1} ({cow['score']*100:.0f}%)"
             cv2.putText(preview_rgb, lbl, (cx1, max(15, cy1 - 8)),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+        # Scan phase: solo bbox de postes + marca mínima de cinta roja.
+        # NO dibujamos piso ni rectángulo acá - eso viene después de que el usuario
+        # elija cuáles 2 postes usar como referencia.
         for post in posts:
             px1, py1, px2, py2 = map(int, post['bbox'])
             color = (255, 0, 255)
@@ -739,6 +934,21 @@ class WeightEstimator:
             cv2.putText(preview_rgb, lbl, (px1, max(15, py1 - 8)),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 2)
 
+            # Marcador visual de la cinta detectada (línea roja central, 1px)
+            # Esto ayuda al usuario a confirmar cuáles postes fueron bien detectados
+            cx = int((px1 + px2) / 2)
+            roi_rgb = preview_rgb[py1:py2, px1:px2]
+            if roi_rgb.size > 0:
+                roi_bgr = cv2.cvtColor(roi_rgb, cv2.COLOR_RGB2BGR)
+                tape = _find_red_tape_rows(roi_bgr)
+                if tape is not None:
+                    y_top_rel, y_bot_rel = tape
+                    ly1 = py1 + y_top_rel
+                    ly2 = py1 + y_bot_rel
+                    cv2.line(preview_rgb, (cx, ly1), (cx, ly2), (255, 0, 0), 1)
+                    cv2.circle(preview_rgb, (cx, ly1), 2, (255, 0, 0), -1)
+                    cv2.circle(preview_rgb, (cx, ly2), 2, (255, 0, 0), -1)
+
         # Encode preview as base64 JPEG
         preview_bgr = cv2.cvtColor(preview_rgb, cv2.COLOR_RGB2BGR)
         _, buf = cv2.imencode('.jpg', preview_bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
@@ -747,7 +957,7 @@ class WeightEstimator:
         _log(f"scan complete: {len(cows)} cows, {len(posts)} posts")
         return {'cows': cows, 'posts': posts, 'preview_b64': preview_b64}
 
-    def estimate_weight(self, img_path, visualize=True, debug=False, debug_context="", return_eye_coords=False, return_keypoint_coords=False, roi_offset=(0, 0), scale_method='both', breed="desconocido", category="desconocido", age_range="desconocido", override_cm_per_px=None, yolo_imgsz=None, cow_index=0, post_indices=None):
+    def estimate_weight(self, img_path, visualize=True, debug=False, debug_context="", return_eye_coords=False, return_keypoint_coords=False, roi_offset=(0, 0), scale_method='both', breed="desconocido", category="desconocido", age_range="desconocido", override_cm_per_px=None, yolo_imgsz=None, cow_index=0, post_indices=None, locked_reference=None):
         """
         Estima el peso del ganado en una imagen
         
@@ -1328,93 +1538,161 @@ class WeightEstimator:
                 cv2.rectangle(img_rgb, (ax1, ay1), (ax2, ay2), (0, 255, 255), 2)
                 cv2.line(img_rgb, (0, band_top), (img_width, band_top), (255, 255, 0), 2)
 
-            # Mostrar postes y mediciones SOLO debajo de la franja amarilla (band_top)
+            # Flow nuevo: cuando el usuario seleccionó postes, todo el render de escala
+            # se hace via RECTÁNGULO (cinta → piso). Cuando no hay selección, render legacy.
             measured_heights = []
-            for idx_c, p in enumerate(poste_candidates):
-                x1, y1, x2, y2 = map(int, p['bbox'])
-                # Solo dibujar postes cuya base (y2) esté debajo de band_top
-                if animal_bbox and y2 < band_top:
-                    continue
-                measured_h = p.get('measured_height_px')
-                if measured_h and measured_h > 0:
-                    measured_heights.append(measured_h)
-                    # Recuadro magenta + verde para candidatos visibles
-                    cv2.rectangle(img_rgb, (x1, y1), (x2, y2), (255, 0, 255), 2)
-                    score = p.get('score', 0)
-                    red_ratio = p.get('yellow_ratio', 0)
-                    cv2.putText(img_rgb, f'POSTE {idx_c+1} (score:{score:.2f} rojo:{red_ratio:.2f})',
-                               (x1, max(15, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
-                    # Recuadro verde para referencia
-                    cv2.rectangle(img_rgb, (x1, y1), (x2, y2), (0, 200, 0), 3)
-                    label_ref = f'REF {idx_c+1}: {measured_h:.1f}px = 50cm'
-                    (tw_r, th_r), _ = cv2.getTextSize(label_ref, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
-                    cv2.rectangle(img_rgb, (x1, max(0, y1 - th_r - 10)), (x1 + tw_r + 4, max(0, y1 - 2)), (0, 0, 0), -1)
-                    cv2.putText(img_rgb, label_ref, (x1 + 2, max(th_r + 2, y1 - 4)),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
-                    # Línea de medición
-                    cx = int((x1 + x2) / 2)
-                    line_y_bottom = y2
-                    line_y_top = max(y1, y2 - int(measured_h))
-                    cv2.line(img_rgb, (cx, line_y_top), (cx, line_y_bottom), (255, 255, 0), 3)
-                    cv2.line(img_rgb, (cx - 8, line_y_top), (cx + 8, line_y_top), (255, 255, 0), 3)
-                    cv2.line(img_rgb, (cx - 8, line_y_bottom), (cx + 8, line_y_bottom), (255, 255, 0), 3)
-                    cv2.circle(img_rgb, (cx, line_y_top), 5, (255, 255, 0), -1)
-                    cv2.circle(img_rgb, (cx, line_y_bottom), 5, (255, 255, 0), -1)
-                    mid_post_y = (line_y_top + line_y_bottom) // 2
-                    cv2.putText(img_rgb, f'{measured_h:.1f}px', (cx + 8, mid_post_y - 5),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+            rect_params_for_details = None  # para retornar en details (lock reference)
 
-            # Línea de escala interpolada entre topes de los 2 postes (naranja)
-            # Sólo cuando el usuario seleccionó exactamente 2 postes y hay vaca.
-            if (post_indices is not None and animal_bbox
-                    and len([p for p in poste_candidates
-                             if p.get('measured_height_px') and p.get('measured_height_px') > 0]) == 2):
-                _vis_pts = []
-                for _p in poste_candidates:
-                    _mh = _p.get('measured_height_px')
-                    if not (_mh and _mh > 0):
+            # Si hay referencia fijada, dibujar el rectángulo fijo (no re-detectar postes)
+            if locked_reference:
+                _p1 = locked_reference.get('post1', {})
+                _p2 = locked_reference.get('post2', {})
+                try:
+                    _rcx1 = int(_p1.get('cx', 0))
+                    _rcx2 = int(_p2.get('cx', 0))
+                    _rtt1 = int(_p1.get('top_tape', 0))
+                    _rtt2 = int(_p2.get('top_tape', 0))
+                    _rfl1 = int(_p1.get('floor', 0))
+                    _rfl2 = int(_p2.get('floor', 0))
+                    _rtp1 = float(_p1.get('tape_px', 0))
+                    _rtp2 = float(_p2.get('tape_px', 0))
+                    if _rcx1 > _rcx2:
+                        _rcx1, _rcx2 = _rcx2, _rcx1
+                        _rtt1, _rtt2 = _rtt2, _rtt1
+                        _rfl1, _rfl2 = _rfl2, _rfl1
+                        _rtp1, _rtp2 = _rtp2, _rtp1
+                    rect_color_fix = (0, 255, 255)
+                    for a, b in [((_rcx1, _rtt1), (_rcx2, _rtt2)),
+                                 ((_rcx1, _rfl1), (_rcx2, _rfl2)),
+                                 ((_rcx1, _rtt1), (_rcx1, _rfl1)),
+                                 ((_rcx2, _rtt2), (_rcx2, _rfl2))]:
+                        cv2.line(img_rgb, a, b, rect_color_fix, 1)
+                    # Marca "REFERENCIA FIJA" en esquina
+                    cv2.putText(img_rgb, 'REF FIJA', (_rcx1 + 4, _rtt1 - 4),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, rect_color_fix, 1)
+                    # Etiquetas cm por lado
+                    for cxp, ttp, flp, tpp, side in [
+                        (_rcx1, _rtt1, _rfl1, _rtp1, 'L'),
+                        (_rcx2, _rtt2, _rfl2, _rtp2, 'R'),
+                    ]:
+                        if tpp > 0:
+                            sc = 112.0 / tpp
+                            h_cm = (flp - ttp) * sc
+                            txt = f"{h_cm:.0f}cm"
+                            ymid = (ttp + flp) // 2
+                            x_txt = cxp + 12 if side == 'L' else cxp - 100
+                            cv2.putText(img_rgb, txt, (x_txt, ymid),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, rect_color_fix, 2)
+                except Exception as _e:
+                    _log(f"locked_ref render failed: {_e}")
+
+            # Si ya hay referencia fijada, NO dibujamos render de postes (ni legacy ni user-selected)
+            # El rectángulo fijo ya se dibujó arriba con locked_reference.
+            if locked_reference:
+                user_selected_2 = False
+                _log("postes: locked_reference activa - skipping post render")
+                # Skip todo el bloque de render
+                continue_render = False
+            else:
+                continue_render = True
+                user_selected_2 = (post_indices is not None
+                                   and len([p for p in poste_candidates
+                                            if p.get('measured_height_px') and p.get('measured_height_px') > 0]) >= 2)
+
+            _log(f"RECT_CHECK: post_indices={post_indices} candidates={len(poste_candidates)} "
+                 f"user_selected_2={user_selected_2}")
+
+            if not continue_render:
+                pass  # locked_reference activa, saltamos todo el render de postes
+            elif user_selected_2:
+                # === RENDER NUEVO: sólo el rectángulo ===
+                _valid_cands = [p for p in poste_candidates
+                                if p.get('measured_height_px') and p.get('measured_height_px') > 0]
+                for p in _valid_cands:
+                    measured_heights.append(p['measured_height_px'])
+
+                sel_post_infos = []
+                for _p in _valid_cands[:2]:
+                    # Bbox magenta mínimo para contexto visual
+                    x1, y1, x2, y2 = map(int, _p['bbox'])
+                    cv2.rectangle(img_rgb, (x1, y1), (x2, y2), (255, 0, 255), 1)
+                    info = _draw_tape_and_floor_on(img_rgb, _p['bbox'])
+                    _log(f"RECT_CHECK: _draw_tape_and_floor_on bbox={_p['bbox']} -> "
+                         f"{'OK' if info else 'None (no tape detected)'}")
+                    if info is not None:
+                        sel_post_infos.append(info)
+
+                if len(sel_post_infos) == 2:
+                    p1, p2 = sel_post_infos[0], sel_post_infos[1]
+                    if p1['cx'] > p2['cx']:
+                        p1, p2 = p2, p1
+                    # Guardar para exponer en details (lock reference)
+                    rect_params_for_details = {
+                        'post1': {'cx': int(p1['cx']), 'top_tape': int(p1['top_tape']),
+                                  'floor': int(p1['floor']), 'tape_px': int(p1['tape_px'])},
+                        'post2': {'cx': int(p2['cx']), 'top_tape': int(p2['top_tape']),
+                                  'floor': int(p2['floor']), 'tape_px': int(p2['tape_px'])},
+                    }
+                    rect_color = (0, 255, 255)  # yellow en RGB
+                    pts_rect = [
+                        ((p1['cx'], p1['top_tape']), (p2['cx'], p2['top_tape'])),
+                        ((p1['cx'], p1['floor']),    (p2['cx'], p2['floor'])),
+                        ((p1['cx'], p1['top_tape']), (p1['cx'], p1['floor'])),
+                        ((p2['cx'], p2['top_tape']), (p2['cx'], p2['floor'])),
+                    ]
+                    for a, b in pts_rect:
+                        cv2.line(img_rgb, a, b, rect_color, 1)
+                    for p, side in [(p1, 'L'), (p2, 'R')]:
+                        if p['tape_px'] > 0:
+                            scale = 112.0 / p['tape_px']
+                            h_cm = (p['floor'] - p['top_tape']) * scale
+                            txt = f"{h_cm:.0f}cm"
+                            ymid = (p['top_tape'] + p['floor']) // 2
+                            x_txt = p['cx'] + 12 if side == 'L' else p['cx'] - 100
+                            cv2.putText(img_rgb, txt, (x_txt, ymid),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, rect_color, 2)
+                    _log(f"RECT_CHECK: rectangle drawn")
+                else:
+                    _log(f"RECT_CHECK: rectangle NOT drawn (need 2 post_infos, got {len(sel_post_infos)})")
+            else:
+                # === RENDER LEGACY: sólo cuando el usuario NO seleccionó 2 postes ===
+                for idx_c, p in enumerate(poste_candidates):
+                    x1, y1, x2, y2 = map(int, p['bbox'])
+                    if animal_bbox and y2 < band_top:
                         continue
-                    _x1p, _y1p, _x2p, _y2p = map(int, _p['bbox'])
-                    if _y2p < band_top:
-                        continue
-                    _cxp = (_x1p + _x2p) // 2
-                    _top_yp = int(_y2p - _mh)
-                    _vis_pts.append((_cxp, _top_yp, float(_mh)))
-                if len(_vis_pts) == 2:
-                    _vis_pts.sort(key=lambda v: v[0])
-                    (_px1, _py1, _mh1), (_px2, _py2, _mh2) = _vis_pts
-                    cv2.line(img_rgb, (_px1, _py1), (_px2, _py2), (0, 165, 255), 2)
-                    cv2.circle(img_rgb, (_px1, _py1), 6, (0, 165, 255), -1)
-                    cv2.circle(img_rgb, (_px2, _py2), 6, (0, 165, 255), -1)
-                    _ax1i, _ay1i, _ax2i, _ay2i = map(int, animal_bbox)
-                    # Intersección de la línea de escala con y = _ay1i (tope del bbox), con extrapolación permitida
-                    if _py2 != _py1:
-                        _sample_x_v_f = _px1 + (_px2 - _px1) * (_ay1i - _py1) / float(_py2 - _py1)
-                    else:
-                        _sample_x_v_f = (_px1 + _px2) / 2.0
-                    _sample_x_v = int(round(_sample_x_v_f))
-                    if _px2 != _px1:
-                        _tv = (_sample_x_v_f - _px1) / float(_px2 - _px1)
-                    else:
-                        _tv = 0.5
-                    _sh = _mh1 + _tv * (_mh2 - _mh1)
-                    # Dibujar: extender la línea de escala hasta el sample_x si está fuera del segmento
-                    _sx_draw = max(0, min(img_width - 1, _sample_x_v))
-                    cv2.line(img_rgb, (_px1, _py1), (_sx_draw, _ay1i), (0, 255, 255), 1)
-                    cv2.line(img_rgb, (_px2, _py2), (_sx_draw, _ay1i), (0, 255, 255), 1)
-                    cv2.circle(img_rgb, (_sx_draw, _ay1i), 7, (0, 255, 255), -1)
-                    _lbl = f'SCALE@cow: {_sh:.1f}px = {self.poste_height_cm:.0f}cm'
-                    (_tw, _th), _ = cv2.getTextSize(_lbl, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
-                    _lx = max(0, min(img_width - _tw - 4, _sx_draw - _tw // 2))
-                    _ly = max(_th + 4, _ay1i - 10)
-                    cv2.rectangle(img_rgb, (_lx - 2, _ly - _th - 4), (_lx + _tw + 2, _ly + 4), (0, 0, 0), -1)
-                    cv2.putText(img_rgb, _lbl, (_lx, _ly),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
+                    measured_h = p.get('measured_height_px')
+                    if measured_h and measured_h > 0:
+                        measured_heights.append(measured_h)
+                        cv2.rectangle(img_rgb, (x1, y1), (x2, y2), (255, 0, 255), 2)
+                        score = p.get('score', 0)
+                        red_ratio = p.get('yellow_ratio', 0)
+                        cv2.putText(img_rgb, f'POSTE {idx_c+1} (score:{score:.2f} rojo:{red_ratio:.2f})',
+                                   (x1, max(15, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
+                        cv2.rectangle(img_rgb, (x1, y1), (x2, y2), (0, 200, 0), 3)
+                        label_ref = f'REF {idx_c+1}: {measured_h:.1f}px = 112cm'
+                        (tw_r, th_r), _ = cv2.getTextSize(label_ref, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+                        cv2.rectangle(img_rgb, (x1, max(0, y1 - th_r - 10)), (x1 + tw_r + 4, max(0, y1 - 2)), (0, 0, 0), -1)
+                        cv2.putText(img_rgb, label_ref, (x1 + 2, max(th_r + 2, y1 - 4)),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
+                        cx = int((x1 + x2) / 2)
+                        line_y_bottom = y2
+                        line_y_top = max(y1, y2 - int(measured_h))
+                        cv2.line(img_rgb, (cx, line_y_top), (cx, line_y_bottom), (255, 255, 0), 3)
+                        cv2.line(img_rgb, (cx - 8, line_y_top), (cx + 8, line_y_top), (255, 255, 0), 3)
+                        cv2.line(img_rgb, (cx - 8, line_y_bottom), (cx + 8, line_y_bottom), (255, 255, 0), 3)
+                        cv2.circle(img_rgb, (cx, line_y_top), 5, (255, 255, 0), -1)
+                        cv2.circle(img_rgb, (cx, line_y_bottom), 5, (255, 255, 0), -1)
+                        mid_post_y = (line_y_top + line_y_bottom) // 2
+                        cv2.putText(img_rgb, f'{measured_h:.1f}px', (cx + 8, mid_post_y - 5),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+
+            # Visualización antigua (línea naranja "SCALE@cow") REEMPLAZADA por el
+            # rectángulo completo arriba (cinta → piso).
 
             # Mostrar promedio si hay 2+ postes visibles
             if len(measured_heights) >= 2:
                 avg_h = sum(measured_heights) / len(measured_heights)
-                avg_text = f'PROMEDIO: {avg_h:.1f}px = 50cm'
+                avg_text = f'PROMEDIO: {avg_h:.1f}px = 112cm'
                 (tw_a, th_a), _ = cv2.getTextSize(avg_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
                 avg_x = img_width - tw_a - 10
                 avg_y = 25
@@ -1426,7 +1704,59 @@ class WeightEstimator:
         escala_postes = None
         _scale_direct_from_postes = False
 
-        if override_cm_per_px is not None:
+        # ── Referencia fijada: computar cm/px usando el CRUCE GEOMÉTRICO
+        #    del borde inferior del bbox con la línea inclinada del piso
+        #    (no con la posición horizontal cow_cx — eso daba extrapolación errónea)
+        if locked_reference and animal_bbox:
+            _p1 = locked_reference.get('post1', {})
+            _p2 = locked_reference.get('post2', {})
+            cx1 = float(_p1.get('cx', 0))
+            cx2 = float(_p2.get('cx', 0))
+            floor1 = float(_p1.get('floor', 0))
+            floor2 = float(_p2.get('floor', 0))
+            tape_px_1 = float(_p1.get('tape_px', 0))
+            tape_px_2 = float(_p2.get('tape_px', 0))
+            if cx1 > cx2:
+                cx1, cx2 = cx2, cx1
+                floor1, floor2 = floor2, floor1
+                tape_px_1, tape_px_2 = tape_px_2, tape_px_1
+            ax1, ay1, ax2, ay2 = animal_bbox
+            cow_cx = (ax1 + ax2) / 2.0
+            if cx2 != cx1 and tape_px_1 > 0 and tape_px_2 > 0:
+                # Misma lógica que /detect_cow_fast: cruce del segmento inferior del bbox
+                # con el segmento del piso del rectángulo, para interpolar escala.
+                X_lo_ = max(ax1, cx1)
+                X_hi_ = min(ax2, cx2)
+                t = None
+                if X_lo_ <= X_hi_ and abs(floor2 - floor1) >= 0.5:
+                    fy_lo = floor1 + (X_lo_ - cx1) / (cx2 - cx1) * (floor2 - floor1)
+                    fy_hi = floor1 + (X_hi_ - cx1) / (cx2 - cx1) * (floor2 - floor1)
+                    d_lo = fy_lo - ay2
+                    d_hi = fy_hi - ay2
+                    if d_lo * d_hi <= 1e-6 and abs(d_lo - d_hi) > 1e-6:
+                        alpha = d_lo / (d_lo - d_hi)
+                        x_cross = X_lo_ + alpha * (X_hi_ - X_lo_)
+                        t = (x_cross - cx1) / (cx2 - cx1)
+                        t = max(0.0, min(1.0, t))
+                if t is None:
+                    # Fallback: posición horizontal (clamped)
+                    p_x = (cow_cx - cx1) / (cx2 - cx1)
+                    t = max(0.0, min(1.0, p_x))
+                scale_1 = 112.0 / tape_px_1
+                scale_2 = 112.0 / tape_px_2
+                escala_postes = (1 - t) * scale_1 + t * scale_2
+                _scale_direct_from_postes = True
+                _log(f"postes: LOCKED_REF escala={escala_postes:.5f} cm/px "
+                     f"(cruce t={t:.3f}, cow_cx={cow_cx:.0f}, bbox_y2={ay2:.0f}, "
+                     f"floor1={floor1:.0f}, floor2={floor2:.0f}, "
+                     f"tape1_px={tape_px_1:.1f}, tape2_px={tape_px_2:.1f})")
+            else:
+                _log(f"postes: LOCKED_REF INVALID (cx1={cx1}, cx2={cx2}, tape1={tape_px_1}, tape2={tape_px_2})")
+
+        if escala_postes is not None:
+            # Ya calculada por locked_reference, saltar demás ramas
+            pass
+        elif override_cm_per_px is not None:
             # Calibración externa provista — usar directamente, sin detección de postes ni depth
             escala_postes = override_cm_per_px
             _log(f"postes: usando override_cm_per_px={override_cm_per_px:.5f} (calibración directa, skip depth)")
@@ -1801,6 +2131,21 @@ class WeightEstimator:
                 # ── Campos para calibración de altura en video ──
                 'cm_per_px': _cm_per_px_used,
                 'animal_bbox_height_px': _animal_bbox_height_px,
+                # Bbox de la vaca en coords RESIZED (letterbox) + orig para overlay
+                'animal_bbox_resized': (
+                    [float(animal_bbox[0]), float(animal_bbox[1]),
+                     float(animal_bbox[2]), float(animal_bbox[3])]
+                    if animal_bbox else None
+                ),
+                'animal_bbox_original': (
+                    [float((animal_bbox[0] - pad_x) / scale_factor),
+                     float((animal_bbox[1] - pad_y) / scale_factor),
+                     float((animal_bbox[2] - pad_x) / scale_factor),
+                     float((animal_bbox[3] - pad_y) / scale_factor)]
+                    if animal_bbox and scale_factor else None
+                ),
+                'video_w': int(w_orig) if 'w_orig' in locals() else None,
+                'video_h': int(h_orig) if 'h_orig' in locals() else None,
                 # ── Corrección por raza/categoría/edad ──
                 'breed': breed,
                 'category': category,
@@ -1808,6 +2153,7 @@ class WeightEstimator:
                 'weight_multiplier': multiplier,
                 'raw_weight': round(raw_weight, 2),
                 'cow_score': float(_cow_scores[_ci]) if _cow_scores is not None and _ci < len(_cow_scores) else None,
+                'rectangle_ref': rect_params_for_details if 'rect_params_for_details' in locals() else None,
             }
             
             # Manejar diferentes combinaciones de retorno

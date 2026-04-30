@@ -849,8 +849,26 @@ def guardar_ply(path, pts_cm, tris, colores, simetrico=False, escala_info=""):
     if simetrico:
         n = len(pts_cm)
         depths = profundidad_eliptica(pts_cm)
-        pts_r = np.column_stack([pts_cm[:, 0], pts_cm[:, 1], depths])
-        pts_l = np.column_stack([pts_cm[:, 0], pts_cm[:, 1], -depths])
+        # Forzar depth=0 en los vertices del RIM (lazo de borde 2D). Asi z+
+        # y z- COINCIDEN en posicion en el rim, sin hueco visual al renderizar
+        # solid. NO se sueldan indices: cada mitad sigue siendo una malla
+        # independiente — las "lineas" estan solo dentro de cada lado, nunca
+        # cruzan al espejo.
+        from collections import Counter as _Counter
+        _ec = _Counter()
+        for a, b, c in tris:
+            for e in [(min(a, b), max(a, b)), (min(b, c), max(b, c)), (min(a, c), max(a, c))]:
+                _ec[e] += 1
+        rim_set = set()
+        for (a, b), k in _ec.items():
+            if k == 1:
+                rim_set.add(a)
+                rim_set.add(b)
+        is_rim = np.array([i in rim_set for i in range(n)])
+        depths_r = depths.copy()
+        depths_r[is_rim] = 0.0
+        pts_r = np.column_stack([pts_cm[:, 0], pts_cm[:, 1], depths_r])
+        pts_l = np.column_stack([pts_cm[:, 0], pts_cm[:, 1], -depths_r])
         all_pts = np.vstack([pts_r, pts_l])
         all_colors = np.vstack([colores, colores]) if colores is not None else None
         tris_r = tris.copy()

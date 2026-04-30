@@ -188,7 +188,7 @@ class DepthEstimator:
                         if score > 0.3 and bbox_ratio < 0.15:
                             adjusted_threshold = yellow_ratio_threshold * 0.3
 
-                        # Validar aspect ratio: cintas verticales deben ser al menos 6x más altas que anchas
+                        # Validar aspect ratio: cintas verticales deben ser al menos 3.5x más altas que anchas
                         bw = x2 - x1
                         bh = y2 - y1
                         aspect = float(bh) / float(max(1, bw))

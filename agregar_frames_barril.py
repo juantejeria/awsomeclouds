@@ -27,6 +27,7 @@ INDEX_FILE = BARRIL_DIR / 'frames_index.json'
 SOURCES = [
     PROJECT / 'checkpoints' / 'desfile26marz',
     PROJECT / 'checkpoints' / '26marz',
+    PROJECT / 'checkpoints' / 'V2Recorte26marz',
 ]
 
 

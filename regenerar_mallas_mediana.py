@@ -3,8 +3,8 @@ Para cada vN en output_modelos3d_live/:
   - Backup de los PLYs originales (envelope) → renombrados a *_envelope_orig.ply
     (el viewer los ignora por el filtro '_orig.ply')
   - Recalcula tops/bottoms/widths como MEDIANA por columna entre los 21 frames
-  - Genera PLYs nuevos (lateral, 3d, volumen) sobre la silueta consenso mediana
-  - Actualiza el resumen.json con vol_barril_litros = vol_mediana
+  - Genera PLYs nuevos (lateral, 3d) sobre la silueta consenso mediana
+  - Actualiza el resumen.json con vol_barril_litros = volumen encerrado del _3d.ply
 
 Uso:
     python regenerar_mallas_mediana.py [--solo v1,v2,...] [--carpeta-frames checkpoints/22abril]
@@ -96,16 +96,6 @@ def _detectar_y_segmentar(img, coco_model, barril_model):
     return (bx1, by1, bx2, by2), binmask
 
 
-def _vol(heights, width, k=0.25):
-    dx = width / (N - 1)
-    v = 0.0
-    for h in heights:
-        if h <= 0:
-            continue
-        v += np.pi * (h / 2.0) * (h * k) * dx
-    return round(v / 1000.0, 1)
-
-
 def procesar(cow_id, altura_cm, frames_dir, coco_model, barril_model, out_dir, peso_real=None):
     contornos = []
     frame_files = sorted(frames_dir.glob('frame_*.jpg'))
@@ -156,8 +146,6 @@ def procesar(cow_id, altura_cm, frames_dir, coco_model, barril_model, out_dir, p
     widths = sorted([c['width'] for c in contornos])
     width_med = widths[len(widths) // 2]
 
-    vol_med = _vol(hs_med, width_med)
-
     # Construir contorno cerrado y triangular
     xs = np.linspace(0, width_med, N)
     contorno_top = np.column_stack([xs, tops_med])
@@ -199,8 +187,7 @@ def procesar(cow_id, altura_cm, frames_dir, coco_model, barril_model, out_dir, p
 
     # Generar PLYs
     sys.path.insert(0, str(PROJ))
-    from generar_modelos3d_grandes import guardar_ply
-    from generar_ply_volumen import rebanadas_desde_contorno, malla_elipsoidal, escribir_ply
+    from generar_modelos3d_grandes import guardar_ply, volumen_malla_cerrada
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -224,16 +211,12 @@ def procesar(cow_id, altura_cm, frames_dir, coco_model, barril_model, out_dir, p
     guardar_ply(str(ply_lat), all_px, tris_arr, colores, simetrico=False,
                 escala_info=f'Consenso A_mediana | n={len(contornos)} frames | alto={altura_cm:.1f}cm')
 
+    # 3D: malla cerrada (silueta espejada). Su volumen encerrado es el volumen
+    # reportado — única fuente de volumen (sin rebanadas/cilindros).
     ply_3d = out_dir / f'{cow_id}_3d.ply'
-    guardar_ply(str(ply_3d), all_px, tris_arr, colores, simetrico=True,
-                escala_info=f'Consenso A_mediana | alto={altura_cm:.1f}cm')
-
-    ply_vol = out_dir / f'{cow_id}_volumen.ply'
-    rebanadas = rebanadas_desde_contorno(contorno_cm, n_slices=80)
-    if len(rebanadas) >= 3:
-        verts_v, tris_v = malla_elipsoidal(rebanadas, n_vert=32)
-        escribir_ply(ply_vol, verts_v, tris_v,
-                     comentario=f'{cow_id} A_mediana ({len(contornos)} frames, {vol_med}L)')
+    pts_3d, tris_3d = guardar_ply(str(ply_3d), all_px, tris_arr, colores, simetrico=True,
+                                  escala_info=f'Consenso A_mediana | alto={altura_cm:.1f}cm')
+    vol_barril = volumen_malla_cerrada(pts_3d, tris_3d)
 
     # Update resumen.json
     res_path = out_dir / f'{cow_id}_resumen.json'
@@ -246,15 +229,14 @@ def procesar(cow_id, altura_cm, frames_dir, coco_model, barril_model, out_dir, p
     if peso_real is not None:
         d['peso_real_kg'] = peso_real
     d['frames_usados'] = len(contornos)
-    d['vol_consenso_A_mediana'] = vol_med
-    d['vol_barril_litros'] = vol_med
-    d['vol_barril_metodo'] = 'A_mediana_malla_regenerada'
+    d['vol_barril_litros'] = vol_barril
+    d['vol_barril_metodo'] = 'malla_cerrada_3d'
     d['width_consenso_cm'] = round(width_med, 1)
     d['alto_max_consenso_cm'] = round(max(hs_med), 1)
     json.dump(d, open(res_path, 'w'), indent=2)
 
     return {
-        'cow_id': cow_id, 'vol_med': vol_med, 'width_med': width_med,
+        'cow_id': cow_id, 'vol_med': vol_barril, 'width_med': width_med,
         'alto_max': max(hs_med), 'verts': len(all_px), 'tris': len(tris_arr),
         'frames': len(contornos),
     }

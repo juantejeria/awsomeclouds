@@ -74,6 +74,8 @@ def main():
     ap.add_argument("folder")
     ap.add_argument("--out", default=None)
     ap.add_argument("--cols", type=int, default=7)
+    ap.add_argument("--barril-model", default="barril_seg.pt",
+                    help=".pt del modelo de segmentación de barril (relativo al proyecto o absoluto)")
     args = ap.parse_args()
 
     folder = Path(args.folder)
@@ -82,8 +84,12 @@ def main():
     out_path = Path(args.out) if args.out else (folder / "diagnostico_barril_grid.png")
 
     proj = Path(__file__).parent
-    print("[init] cargando modelos...")
-    barril = YOLO(str(proj / "barril_seg.pt"))
+    _barril_arg = Path(args.barril_model)
+    barril_path = _barril_arg if _barril_arg.is_absolute() else (proj / _barril_arg)
+    if not barril_path.exists():
+        print(f"[error] modelo barril no existe: {barril_path}"); return
+    print(f"[init] cargando modelos... (barril={barril_path.name})")
+    barril = YOLO(str(barril_path))
     coco = YOLO(str(proj / "yolov8n.pt"))
 
     files = sorted([p for p in folder.iterdir() if p.suffix.lower() == ".jpg"])

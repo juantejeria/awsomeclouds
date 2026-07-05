@@ -1,7 +1,10 @@
 """
 Editor de Barril - Training Mode.
-UI para anotar el barril en 108 frames extraídos de videos.
+UI para anotar el barril en frames extraídos de videos.
 Funciones: ver galería, editar (recortar con líneas), guardar, descartar.
+
+Nota: "Descartar" borra el frame del índice y elimina sus archivos del disco
+(con doble confirmación en la UI). No existe estado 'discarded'.
 """
 
 import cv2
@@ -15,6 +18,7 @@ from pathlib import Path
 from generar_modelos3d_grandes import volumen_por_rebanadas
 import json
 import base64
+import threading
 
 app = Flask(__name__)
 
@@ -29,15 +33,34 @@ PROJECT = Path(__file__).parent
 DATA_DIR = PROJECT / 'output_modelos3d_grandes' / '_barril_training'
 INDEX_FILE = DATA_DIR / 'frames_index.json'
 
+# Datasets (campo 'source') que se MUESTRAN en la galería del editor. Solo filtra
+# la vista; load_index() sigue devolviendo TODO (save/validate/discard reescriben
+# el índice completo, así que no se debe filtrar ahí). Para mostrar más, agregar acá.
+VISIBLE_SOURCES = {'6mayo', '12junio', '14mayo', '20mayo'}
+
+
+def visible_frames():
+    return [f for f in load_index() if f.get('source') in VISIBLE_SOURCES]
+
 
 def load_index():
     with open(INDEX_FILE) as f:
         return json.load(f)
 
 
+_index_lock = threading.RLock()
+
+
 def save_index(data):
-    with open(INDEX_FILE, 'w') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    # Escritura atómica + lock para evitar corrupción por peticiones concurrentes
+    # (Flask corre con threaded=True). Se escribe a un temporal y luego os.replace.
+    with _index_lock:
+        tmp = str(INDEX_FILE) + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, INDEX_FILE)
 
 
 def img_to_b64(path):
@@ -65,74 +88,127 @@ body { font-family:monospace; background:#1a1a2e; color:#eee; }
 .stat-pending { background:#e67e22; color:#000; }
 .stat-edited { background:#27ae60; color:#fff; }
 .stat-validated { background:#9b59b6; color:#fff; }
-.stat-discarded { background:#e74c3c; color:#fff; }
 .filters { background:#0d1b2a; padding:10px 20px; display:flex; gap:10px; align-items:center; }
-.filters select, .filters button { padding:6px 12px; border-radius:4px; border:1px solid #444; background:#16213e; color:#eee; font-family:monospace; cursor:pointer; }
+.filters input, .filters button { padding:6px 12px; border-radius:4px; border:1px solid #444; background:#16213e; color:#eee; font-family:monospace; cursor:pointer; }
+.filters input { cursor:text; min-width:220px; }
 .filters button:hover { background:#0ff; color:#000; }
-.gallery { display:grid; grid-template-columns:repeat(auto-fill, minmax(200px, 1fr)); gap:8px; padding:15px; }
-.card { background:#16213e; border-radius:8px; overflow:hidden; cursor:pointer; position:relative; transition:transform 0.2s; }
-.card:hover { transform:scale(1.03); }
-.card img { width:100%; height:150px; object-fit:cover; }
-.card .info { padding:6px 8px; font-size:11px; }
-.card .status { position:absolute; top:5px; right:5px; padding:2px 6px; border-radius:3px; font-size:10px; font-weight:bold; }
-.status-pending { background:#e67e22; color:#000; }
-.status-edited { background:#27ae60; color:#fff; }
-.status-validated { background:#9b59b6; color:#fff; }
-.status-discarded { background:#e74c3c; color:#fff; opacity:0.8; }
-.card.discarded { opacity:0.4; }
-.card.discarded img { filter:grayscale(100%); }
+.gallery { display:grid; grid-template-columns:repeat(auto-fill, minmax(240px, 1fr)); gap:10px; padding:15px; }
+.card { background:#16213e; border-radius:8px; padding:12px; cursor:pointer; transition:transform 0.15s, background 0.15s; border:1px solid #243; }
+.card:hover { transform:scale(1.02); background:#1d2b4a; border-color:#0ff; }
+.card .name { font-size:13px; font-weight:bold; color:#0ff; word-break:break-all; margin-bottom:8px; }
+.card .bar { height:6px; border-radius:3px; background:#0d1b2a; overflow:hidden; margin-bottom:8px; }
+.card .bar > i { display:block; height:100%; background:#9b59b6; }
+.chips { display:flex; flex-wrap:wrap; gap:5px; font-size:11px; }
+.chip { padding:2px 7px; border-radius:3px; font-weight:bold; }
+.status-pending, .chip-pending { background:#e67e22; color:#000; }
+.status-edited, .chip-edited { background:#27ae60; color:#fff; }
+.status-validated, .chip-validated { background:#9b59b6; color:#fff; }
+.chip-cruz { background:#ffd700; color:#000; }
+.chip-anca { background:#ff44ff; color:#000; }
+.chip-total { background:#0d1b2a; color:#aaa; }
 </style>
 </head>
 <body>
 <div class="header">
-    <h1>Barrel Training - {{ total }} frames</h1>
+    <h1>Barrel Training - {{ groups|length }} individuos / {{ total }} frames</h1>
     <div class="stats">
         <span class="stat stat-pending">Pendientes: {{ pending }}</span>
         <span class="stat stat-edited">Editados: {{ edited }}</span>
         <span class="stat stat-validated">Validados: {{ validated }}</span>
-        <span class="stat stat-discarded">Descartados: {{ discarded }}</span>
     </div>
 </div>
 <div class="filters">
-    <label>Filtrar:</label>
-    <select id="filterIndividuo" onchange="applyFilter()">
-        <option value="all">Todos</option>
-        {% for ind in individuos %}
-        <option value="{{ ind }}">{{ ind }}</option>
-        {% endfor %}
-    </select>
-    <select id="filterStatus" onchange="applyFilter()">
-        <option value="all">Todos</option>
-        <option value="pending">Pendientes</option>
-        <option value="edited">Editados</option>
-        <option value="validated">Validados</option>
-        <option value="discarded">Descartados</option>
-    </select>
+    <label>Buscar:</label>
+    <input id="search" type="text" placeholder="nombre del individuo..." oninput="applyFilter()">
     <button onclick="window.location.reload()">Refrescar</button>
 </div>
 <div class="gallery" id="gallery">
-    {% for f in frames %}
-    <div class="card {{ 'discarded' if f.status == 'discarded' else '' }}"
-         data-individuo="{{ f.individuo }}" data-status="{{ f.status }}"
-         onclick="window.location='/edit/{{ f.id }}'">
-        <img src="/frame_img/{{ f.id }}" loading="lazy">
-        <span class="status status-{{ f.status }}">{{ f.status }}</span>
-        <div class="info">{{ f.individuo.replace('vaca_','').replace('_36','') }} #{{ f.frame_idx }}</div>
+    {% for g in groups %}
+    <div class="card" data-name="{{ g.individuo|lower }}" onclick="window.location='/individuo?ind={{ g.individuo|urlencode }}'">
+        <div class="name">{{ g.individuo }}</div>
+        <div class="bar"><i style="width:{{ (100*g.validated/g.total)|round(0,'floor') }}%"></i></div>
+        <div class="chips">
+            <span class="chip chip-total">{{ g.total }} frames</span>
+            {% if g.pending %}<span class="chip chip-pending">⏳ {{ g.pending }}</span>{% endif %}
+            {% if g.edited %}<span class="chip chip-edited">✎ {{ g.edited }}</span>{% endif %}
+            {% if g.validated %}<span class="chip chip-validated">✓ {{ g.validated }}</span>{% endif %}
+            <span class="chip chip-cruz">✛ {{ g.cruz }}</span>
+            <span class="chip chip-anca">✛ {{ g.anca }}</span>
+        </div>
     </div>
     {% endfor %}
 </div>
 <script>
 function applyFilter() {
-    let ind = document.getElementById('filterIndividuo').value;
-    let status = document.getElementById('filterStatus').value;
+    let q = document.getElementById('search').value.toLowerCase().trim();
     document.querySelectorAll('.card').forEach(c => {
-        let show = true;
-        if (ind !== 'all' && c.dataset.individuo !== ind) show = false;
-        if (status !== 'all' && c.dataset.status !== status) show = false;
-        c.style.display = show ? '' : 'none';
+        c.style.display = (!q || c.dataset.name.includes(q)) ? '' : 'none';
     });
 }
 </script>
+</body>
+</html>
+"""
+
+# ═══════════════════════════════════════
+# FRAMES DE UN INDIVIDUO (lista, sin miniatura)
+# ═══════════════════════════════════════
+
+INDIVIDUO_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<title>{{ individuo }} - frames</title>
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:monospace; background:#1a1a2e; color:#eee; }
+.header { background:#16213e; padding:12px 20px; display:flex; justify-content:space-between; align-items:center; gap:12px; }
+.header h1 { font-size:15px; color:#0ff; word-break:break-all; }
+.header a { padding:6px 14px; border:1px solid #444; border-radius:4px; background:#16213e; color:#eee; text-decoration:none; font-size:12px; }
+.header a:hover { background:#0ff; color:#000; }
+.stats { display:flex; gap:10px; font-size:12px; }
+.chip { padding:3px 9px; border-radius:3px; font-weight:bold; }
+.chip-pending { background:#e67e22; color:#000; }
+.chip-edited { background:#27ae60; color:#fff; }
+.chip-validated { background:#9b59b6; color:#fff; }
+.chip-cruz { background:#ffd700; color:#000; }
+.chip-anca { background:#ff44ff; color:#000; }
+.list { padding:15px; display:flex; flex-direction:column; gap:6px; max-width:760px; }
+.row { background:#16213e; border-radius:6px; padding:10px 14px; cursor:pointer; display:flex; justify-content:space-between; align-items:center; border:1px solid #243; transition:background 0.12s; }
+.row:hover { background:#1d2b4a; border-color:#0ff; }
+.row .fid { font-size:12px; }
+.row .badges { display:flex; gap:6px; align-items:center; }
+.status-pending { background:#e67e22; color:#000; }
+.status-edited { background:#27ae60; color:#fff; }
+.status-validated { background:#9b59b6; color:#fff; }
+.status { padding:2px 8px; border-radius:3px; font-size:11px; font-weight:bold; }
+</style>
+</head>
+<body>
+<div class="header">
+    <h1>{{ individuo }}</h1>
+    <div class="stats">
+        <span class="chip chip-pending">⏳ {{ pending }}</span>
+        <span class="chip chip-edited">✎ {{ edited }}</span>
+        <span class="chip chip-validated">✓ {{ validated }}</span>
+        <span class="chip chip-cruz">✛ {{ cruz }}</span>
+        <span class="chip chip-anca">✛ {{ anca }}</span>
+    </div>
+    <a href="/gallery">← Individuos</a>
+</div>
+<div class="list">
+    {% for f in frames %}
+    <div class="row" onclick="window.location='/edit/{{ f.id }}'">
+        <span class="fid">Frame #{{ f.frame_idx }}</span>
+        <span class="badges">
+            {% if f.cruz %}<span style="color:#ffd700;font-weight:bold;">✛</span>{% endif %}
+            {% if f.anca %}<span style="color:#ff44ff;font-weight:bold;">✛</span>{% endif %}
+            <span class="status status-{{ f.status }}">{{ f.status }}</span>
+        </span>
+    </div>
+    {% endfor %}
+</div>
 </body>
 </html>
 """
@@ -179,7 +255,8 @@ canvas { cursor:crosshair; }
 <div class="header">
     <h1>{{ frame.individuo }} - Frame #{{ frame.frame_idx }} [{{ frame.status }}]</h1>
     <div class="nav-btns">
-        <a href="/gallery">Galeria</a>
+        <a href="/individuo?ind={{ frame.individuo|urlencode }}">{{ frame.individuo }}</a>
+        <a href="/gallery">Individuos</a>
         {% if prev_id %}<a href="/edit/{{ prev_id }}">← Anterior</a>{% endif %}
         {% if next_id %}<a href="/edit/{{ next_id }}">Siguiente →</a>{% endif %}
         <button class="btn-save" onclick="guardar()">Guardar</button>
@@ -193,6 +270,8 @@ canvas { cursor:crosshair; }
             <span style="color:#0c0;">■</span>Barrel
             <span style="color:#f00;">■</span>Descartado
             <span style="color:#35f;">■</span>Modelo
+            <span style="color:#ffd700;">✛</span>Cruz
+            <span style="color:#ff44ff;">✛</span>Anca
         </span>
     </div>
 </div>
@@ -205,6 +284,8 @@ canvas { cursor:crosshair; }
             <b>Modo Corte:</b> Click y arrastra para dibujar lineas de corte. Las partes desconectadas se descartan.<br>
             <b>Modo Pincel+:</b> Pinta para AGREGAR area a la mascara.<br>
             <b>Modo Pincel-:</b> Pinta para BORRAR area de la mascara.<br>
+            <b>Modo Punto Cruz:</b> Click para marcar el punto de la cruz (1 por frame).<br>
+            <b>Modo Punto Anca:</b> Click para marcar el punto del anca (1 por frame).<br>
             Scroll o slider para cambiar tamano del pincel.
         </div>
         <h3>Modo</h3>
@@ -212,6 +293,8 @@ canvas { cursor:crosshair; }
             <button class="mode-btn active" id="modeCut" onclick="setMode('cut')">Corte</button>
             <button class="mode-btn" id="modeBrushAdd" onclick="setMode('brush-add')">Pincel +</button>
             <button class="mode-btn" id="modeBrushErase" onclick="setMode('brush-erase')">Pincel -</button>
+            <button class="mode-btn" id="modeCruz" onclick="setMode('cruz')" style="border-color:#ffd700;">Punto Cruz</button>
+            <button class="mode-btn" id="modeAnca" onclick="setMode('anca')" style="border-color:#ff44ff;">Punto Anca</button>
         </div>
         <div class="brush-controls" id="brushControls" style="display:none;">
             <span>Pincel:</span>
@@ -225,6 +308,12 @@ canvas { cursor:crosshair; }
         </div>
         <h3>Cortes (<span id="cutCount">0</span>)</h3>
         <div class="cuts-list" id="cutsList"></div>
+        <h3 style="color:#ffd700;">Punto de Cruz</h3>
+        <div class="info-box" id="cruzInfo" style="border:1px solid #ffd700;">Sin marcar</div>
+        <button class="mode-btn" onclick="clearCruz()" style="border-color:#e74c3c;">Borrar punto</button>
+        <h3 style="color:#ff44ff;">Punto de Anca</h3>
+        <div class="info-box" id="ancaInfo" style="border:1px solid #ff44ff;">Sin marcar</div>
+        <button class="mode-btn" onclick="clearAnca()" style="border-color:#e74c3c;">Borrar punto</button>
     </div>
 </div>
 <script>
@@ -241,6 +330,8 @@ let predMask;
 let showPred = false;
 let showOverlay = false;
 let cuts = {{ cuts_json|safe }};
+let cruzPoint = {{ cruz_json|safe }};  // {x, y} en coords de imagen original, o null
+let ancaPoint = {{ anca_json|safe }};  // {x, y} en coords de imagen original, o null
 let drawing = false;
 let startX, startY, currentMouseX = 0, currentMouseY = 0;
 let scale = 1, offsetX = 0, offsetY = 0;
@@ -291,11 +382,15 @@ maskImg.onload = function() {
         for (let i = 0; i < predMask.length; i++) predMask[i] = pd.data[i*4] > 128 ? 1 : 0;
         draw();
         updateCutsList();
+        updateCruzInfo();
+        updateAncaInfo();
     };
     predImg.onerror = function() {
         predMask = null;
         draw();
         updateCutsList();
+        updateCruzInfo();
+        updateAncaInfo();
     };
     predImg.src = "data:image/png;base64,{{ pred_b64 }}";
 };
@@ -317,11 +412,26 @@ function toCanvasCoords(ix, iy) { return [ix*scale+offsetX, iy*scale+offsetY]; }
 function setMode(mode) {
     editMode = mode;
     document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
-    document.getElementById(mode==='cut'?'modeCut':mode==='brush-add'?'modeBrushAdd':'modeBrushErase').classList.add('active');
-    document.getElementById('brushControls').style.display = mode==='cut'?'none':'flex';
-    canvas.style.cursor = mode==='cut'?'crosshair':'none';
+    let btnId = mode==='cut'?'modeCut':mode==='brush-add'?'modeBrushAdd':mode==='brush-erase'?'modeBrushErase':mode==='cruz'?'modeCruz':'modeAnca';
+    document.getElementById(btnId).classList.add('active');
+    document.getElementById('brushControls').style.display = (mode==='brush-add'||mode==='brush-erase')?'flex':'none';
+    canvas.style.cursor = (mode==='cut'||mode==='cruz'||mode==='anca')?'crosshair':'none';
     draw();
 }
+
+function updateCruzInfo() {
+    let el = document.getElementById('cruzInfo');
+    if (cruzPoint) el.innerHTML = '<span style="color:#ffd700;">✛</span> x=' + Math.round(cruzPoint.x) + ', y=' + Math.round(cruzPoint.y);
+    else el.textContent = 'Sin marcar';
+}
+function clearCruz() { cruzPoint = null; updateCruzInfo(); draw(); }
+
+function updateAncaInfo() {
+    let el = document.getElementById('ancaInfo');
+    if (ancaPoint) el.innerHTML = '<span style="color:#ff44ff;">✛</span> x=' + Math.round(ancaPoint.x) + ', y=' + Math.round(ancaPoint.y);
+    else el.textContent = 'Sin marcar';
+}
+function clearAnca() { ancaPoint = null; updateAncaInfo(); draw(); }
 
 function initBrushMask() {
     if (!brushMask || brushMask.length !== img.width * img.height) {
@@ -433,8 +543,28 @@ function draw() {
         ctx.strokeStyle=COLORS[cuts.length%COLORS.length]; ctx.lineWidth=2;
         ctx.setLineDash([5,5]); ctx.stroke(); ctx.setLineDash([]);
     }
+    // Draw cruz point marker (siempre visible si está marcado)
+    if (cruzPoint) {
+        let [px,py] = toCanvasCoords(cruzPoint.x, cruzPoint.y);
+        ctx.strokeStyle='#ffd700'; ctx.lineWidth=2;
+        ctx.beginPath(); ctx.moveTo(px-14,py); ctx.lineTo(px+14,py); ctx.moveTo(px,py-14); ctx.lineTo(px,py+14); ctx.stroke();
+        ctx.beginPath(); ctx.arc(px,py,6,0,Math.PI*2);
+        ctx.fillStyle='rgba(255,215,0,0.85)'; ctx.fill();
+        ctx.strokeStyle='#000'; ctx.lineWidth=1.5; ctx.stroke();
+        ctx.fillStyle='#ffd700'; ctx.font='bold 12px monospace'; ctx.fillText('Cruz', px+12, py-10);
+    }
+    // Draw anca point marker (siempre visible si está marcado)
+    if (ancaPoint) {
+        let [px,py] = toCanvasCoords(ancaPoint.x, ancaPoint.y);
+        ctx.strokeStyle='#ff44ff'; ctx.lineWidth=2;
+        ctx.beginPath(); ctx.moveTo(px-14,py); ctx.lineTo(px+14,py); ctx.moveTo(px,py-14); ctx.lineTo(px,py+14); ctx.stroke();
+        ctx.beginPath(); ctx.arc(px,py,6,0,Math.PI*2);
+        ctx.fillStyle='rgba(255,68,255,0.85)'; ctx.fill();
+        ctx.strokeStyle='#000'; ctx.lineWidth=1.5; ctx.stroke();
+        ctx.fillStyle='#ff44ff'; ctx.font='bold 12px monospace'; ctx.fillText('Anca', px+12, py-10);
+    }
     // Draw brush cursor
-    if (editMode !== 'cut') {
+    if (editMode === 'brush-add' || editMode === 'brush-erase') {
         ctx.beginPath();
         ctx.arc(currentMouseX, currentMouseY, brushRadius * scale, 0, Math.PI * 2);
         ctx.strokeStyle = editMode === 'brush-add' ? '#00ff88' : '#ff4444';
@@ -449,8 +579,22 @@ canvas.addEventListener('mousedown', e => {
     let r=canvas.getBoundingClientRect();
     let mx = e.clientX-r.left, my = e.clientY-r.top;
     [startX,startY]=toImgCoords(mx, my);
+    if (editMode === 'cruz') {
+        cruzPoint = {x: Math.round(startX), y: Math.round(startY)};
+        drawing = false;
+        updateCruzInfo();
+        draw();
+        return;
+    }
+    if (editMode === 'anca') {
+        ancaPoint = {x: Math.round(startX), y: Math.round(startY)};
+        drawing = false;
+        updateAncaInfo();
+        draw();
+        return;
+    }
     drawing=true;
-    if (editMode !== 'cut') {
+    if (editMode === 'brush-add' || editMode === 'brush-erase') {
         initBrushMask();
         currentStroke = [];
         let val = editMode === 'brush-add' ? 1 : -1;
@@ -462,13 +606,13 @@ canvas.addEventListener('mousedown', e => {
 canvas.addEventListener('mousemove', e => {
     let r=canvas.getBoundingClientRect();
     currentMouseX=e.clientX-r.left; currentMouseY=e.clientY-r.top;
-    if (drawing && editMode !== 'cut') {
+    if (drawing && (editMode === 'brush-add' || editMode === 'brush-erase')) {
         let [ix, iy] = toImgCoords(currentMouseX, currentMouseY);
         let val = editMode === 'brush-add' ? 1 : -1;
         let pixels = paintBrush(ix, iy, val);
         currentStroke.push(...pixels);
     }
-    if(drawing || editMode !== 'cut') draw();
+    if(drawing || editMode === 'brush-add' || editMode === 'brush-erase') draw();
 });
 canvas.addEventListener('mouseup', e => {
     if(!drawing) return; drawing=false;
@@ -538,7 +682,7 @@ function guardar() {
     }
     fetch('/api/save', {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({id:frameId, cuts:cuts, mask_rle:runs, brush_rle:brushRle, width:img.width, height:img.height})
+        body:JSON.stringify({id:frameId, cuts:cuts, mask_rle:runs, brush_rle:brushRle, cruz:cruzPoint, anca:ancaPoint, width:img.width, height:img.height})
     }).then(r=>r.json()).then(d => {
         document.getElementById('statusLabel').textContent = 'edited';
         // Auto-avanzar al siguiente
@@ -547,15 +691,29 @@ function guardar() {
 }
 
 function descartar() {
+    if (!confirm('¿Descartar este frame? Se BORRARÁ del índice y se eliminarán sus archivos del disco. Acción IRREVERSIBLE.')) return;
+    if (!confirm('Confirmación final: borrar permanentemente "' + frameId + '"?')) return;
     fetch('/api/discard', {
         method:'POST', headers:{'Content-Type':'application/json'},
         body:JSON.stringify({id:frameId})
     }).then(r=>r.json()).then(d => {
-        {% if next_id %}window.location='/edit/{{ next_id }}';{% else %}alert('Descartado! (ultimo frame)');{% endif %}
+        if (!d.ok) { alert('Error: ' + (d.error || 'desconocido')); return; }
+        {% if next_id %}window.location='/edit/{{ next_id }}';{% else %}window.location='/gallery';{% endif %}
     });
 }
 
 function validar() {
+    // Exigir AMBOS puntos (cruz + anca) antes de validar
+    if (!cruzPoint) {
+        alert('Falta marcar el Punto de Cruz antes de validar.\\nActivá el modo "Punto Cruz" y hacé click en la cruz del individuo.');
+        setMode('cruz');
+        return;
+    }
+    if (!ancaPoint) {
+        alert('Falta marcar el Punto de Anca antes de validar.\\nActivá el modo "Punto Anca" y hacé click en el anca del individuo.');
+        setMode('anca');
+        return;
+    }
     // Primero guarda los cortes actuales, luego marca como validada
     let barrel = computeBarrelMask();
     let runs=[], count=0, cur=barrel[0];
@@ -575,8 +733,9 @@ function validar() {
     }
     fetch('/api/validate', {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({id:frameId, cuts:cuts, mask_rle:runs, brush_rle:brushRle2, width:img.width, height:img.height})
+        body:JSON.stringify({id:frameId, cuts:cuts, mask_rle:runs, brush_rle:brushRle2, cruz:cruzPoint, anca:ancaPoint, width:img.width, height:img.height})
     }).then(r=>r.json()).then(d => {
+        if (!d.ok) { alert('Error al validar: ' + (d.error || 'desconocido')); return; }
         document.getElementById('statusLabel').textContent = 'validated';
         {% if next_id %}window.location='/edit/{{ next_id }}';{% else %}alert('Validado! (ultimo frame)');{% endif %}
     });
@@ -599,22 +758,56 @@ document.addEventListener('keydown', e => {
 @app.route('/')
 @app.route('/gallery')
 def gallery():
-    frames = load_index()
-    individuos = sorted(set(f['individuo'] for f in frames))
+    frames = visible_frames()
+    groups_map = {}
+    for f in frames:
+        ind = f['individuo']
+        g = groups_map.get(ind)
+        if g is None:
+            g = {'individuo': ind, 'total': 0, 'pending': 0, 'edited': 0, 'validated': 0, 'cruz': 0, 'anca': 0}
+            groups_map[ind] = g
+        g['total'] += 1
+        g[f['status']] = g.get(f['status'], 0) + 1
+        if f.get('cruz'):
+            g['cruz'] += 1
+        if f.get('anca'):
+            g['anca'] += 1
+    groups = [groups_map[k] for k in sorted(groups_map)]
     pending = sum(1 for f in frames if f['status'] == 'pending')
     edited = sum(1 for f in frames if f['status'] == 'edited')
     validated = sum(1 for f in frames if f['status'] == 'validated')
-    discarded = sum(1 for f in frames if f['status'] == 'discarded')
     return render_template_string(GALLERY_HTML,
-        frames=frames, individuos=individuos, total=len(frames),
-        pending=pending, edited=edited, validated=validated, discarded=discarded)
+        groups=groups, total=len(frames),
+        pending=pending, edited=edited, validated=validated)
+
+
+@app.route('/individuo')
+def individuo():
+    ind = request.args.get('ind', '')
+    frames = [f for f in load_index() if f['individuo'] == ind]
+    if not frames:
+        return "Individuo no encontrado", 404
+    frames.sort(key=lambda f: f.get('frame_idx', 0))
+    pending = sum(1 for f in frames if f['status'] == 'pending')
+    edited = sum(1 for f in frames if f['status'] == 'edited')
+    validated = sum(1 for f in frames if f['status'] == 'validated')
+    cruz = sum(1 for f in frames if f.get('cruz'))
+    anca = sum(1 for f in frames if f.get('anca'))
+    return render_template_string(INDIVIDUO_HTML,
+        individuo=ind, frames=frames,
+        pending=pending, edited=edited, validated=validated, cruz=cruz, anca=anca)
 
 
 @app.route('/frame_img/<frame_id>')
 def frame_img(frame_id):
-    path = DATA_DIR / f"{frame_id}_img.jpg"
-    if path.exists():
-        return send_file(str(path), mimetype='image/jpeg')
+    # El índice guarda la extensión real (.jpg o .png según el origen del frame)
+    for f in load_index():
+        if f['id'] == frame_id:
+            path = DATA_DIR / f['img']
+            if path.exists():
+                mime = 'image/png' if path.suffix.lower() == '.png' else 'image/jpeg'
+                return send_file(str(path), mimetype=mime)
+            break
     return "not found", 404
 
 
@@ -631,22 +824,20 @@ def edit(frame_id):
     if frame is None:
         return "Frame not found", 404
 
-    # Navigation: find prev/next non-discarded
-    prev_id = None
-    next_id = None
-    for i in range(idx - 1, -1, -1):
-        if frames[i]['status'] != 'discarded':
-            prev_id = frames[i]['id']
-            break
-    for i in range(idx + 1, len(frames)):
-        if frames[i]['status'] != 'discarded':
-            next_id = frames[i]['id']
-            break
+    # Navegación restringida a frames del mismo individuo, ordenados por frame_idx
+    siblings = sorted(
+        (f for f in frames if f['individuo'] == frame['individuo']),
+        key=lambda f: f.get('frame_idx', 0))
+    sib_pos = next(i for i, f in enumerate(siblings) if f['id'] == frame_id)
+    prev_id = siblings[sib_pos - 1]['id'] if sib_pos > 0 else None
+    next_id = siblings[sib_pos + 1]['id'] if sib_pos + 1 < len(siblings) else None
 
     img_b64 = img_to_b64(DATA_DIR / frame['img'])
     mask_b64 = img_to_b64(DATA_DIR / frame['mask'])
     cuts_json = json.dumps(frame.get('cuts', []))
     brush_rle_json = json.dumps(frame.get('brush_rle', []))
+    cruz_json = json.dumps(frame.get('cruz', None))
+    anca_json = json.dumps(frame.get('anca', None))
 
     # Cargar predicción del modelo si existe
     pred_path = DATA_DIR / f"{frame['id']}_pred.png"
@@ -658,7 +849,7 @@ def edit(frame_id):
 
     return render_template_string(EDITOR_HTML,
         frame=frame, prev_id=prev_id, next_id=next_id,
-        img_b64=img_b64, mask_b64=mask_b64, pred_b64=pred_b64, cuts_json=cuts_json, brush_rle_json=brush_rle_json)
+        img_b64=img_b64, mask_b64=mask_b64, pred_b64=pred_b64, cuts_json=cuts_json, brush_rle_json=brush_rle_json, cruz_json=cruz_json, anca_json=anca_json)
 
 
 @app.route('/api/save', methods=['POST'])
@@ -668,17 +859,22 @@ def api_save():
     cuts = req['cuts']
     mask_rle = req['mask_rle']
     brush_rle = req.get('brush_rle', [])
+    cruz = req.get('cruz', None)
+    anca = req.get('anca', None)
     width = req['width']
     height = req['height']
 
-    frames = load_index()
-    for f in frames:
-        if f['id'] == frame_id:
-            f['status'] = 'edited'
-            f['cuts'] = cuts
-            f['brush_rle'] = brush_rle
-            break
-    save_index(frames)
+    with _index_lock:
+        frames = load_index()
+        for f in frames:
+            if f['id'] == frame_id:
+                f['status'] = 'edited'
+                f['cuts'] = cuts
+                f['brush_rle'] = brush_rle
+                f['cruz'] = cruz
+                f['anca'] = anca
+                break
+        save_index(frames)
 
     # Guardar máscara del barril
     barrel = np.zeros(width * height, dtype=np.uint8)
@@ -695,15 +891,22 @@ def api_save():
 
 @app.route('/api/discard', methods=['POST'])
 def api_discard():
+    """Borra el frame del índice y elimina sus archivos del disco."""
     req = request.json
     frame_id = req['id']
-    frames = load_index()
-    for f in frames:
-        if f['id'] == frame_id:
-            f['status'] = 'discarded'
-            break
-    save_index(frames)
-    return jsonify({'ok': True})
+    with _index_lock:
+        frames = load_index()
+        new_frames = [f for f in frames if f['id'] != frame_id]
+        if len(new_frames) == len(frames):
+            return jsonify({'ok': False, 'error': 'frame no encontrado'}), 404
+
+        for suffix in ('_img.jpg', '_img.png', '_mask.png', '_pred.png', '_barrel.png'):
+            p = DATA_DIR / f"{frame_id}{suffix}"
+            if p.exists():
+                p.unlink()
+
+        save_index(new_frames)
+    return jsonify({'ok': True, 'remaining': len(new_frames)})
 
 
 @app.route('/api/validate', methods=['POST'])
@@ -713,17 +916,31 @@ def api_validate():
     cuts = req['cuts']
     mask_rle = req['mask_rle']
     brush_rle = req.get('brush_rle', [])
+    cruz = req.get('cruz', None)
+    anca = req.get('anca', None)
     width = req['width']
     height = req['height']
 
-    frames = load_index()
-    for f in frames:
-        if f['id'] == frame_id:
-            f['status'] = 'validated'
-            f['cuts'] = cuts
-            f['brush_rle'] = brush_rle
-            break
-    save_index(frames)
+    # Solo se puede validar con AMBOS puntos marcados (cruz + anca).
+    if not cruz or not anca:
+        falta = []
+        if not cruz:
+            falta.append('cruz')
+        if not anca:
+            falta.append('anca')
+        return jsonify({'ok': False, 'error': 'falta punto: ' + ', '.join(falta)}), 400
+
+    with _index_lock:
+        frames = load_index()
+        for f in frames:
+            if f['id'] == frame_id:
+                f['status'] = 'validated'
+                f['cuts'] = cuts
+                f['brush_rle'] = brush_rle
+                f['cruz'] = cruz
+                f['anca'] = anca
+                break
+        save_index(frames)
 
     # Guardar máscara del barril
     barrel = np.zeros(width * height, dtype=np.uint8)
@@ -742,4 +959,4 @@ if __name__ == '__main__':
     print(f"\n  Barrel Training Editor")
     print(f"  {len(load_index())} frames disponibles")
     print(f"  Abrir en: http://localhost:5055\n")
-    app.run(host='0.0.0.0', port=5055, debug=False)
+    app.run(host='0.0.0.0', port=5055, debug=False, threaded=True)

@@ -880,6 +880,16 @@ def guardar_ply(path, pts_cm, tris, colores, simetrico=False, escala_info=""):
         all_colors = colores
         all_tris = tris
 
+    # Recorte de cresta del LOMO: baja el filo superior (ancho z~0) hasta el lomo
+    # real, igual que el post-proceso recortar_cresta_ply.py. Solución integral
+    # para que los modelos NUEVOS no nazcan con cresta. En el caso plano (z=0 en
+    # todo) no hace nada. No toca la panza.
+    try:
+        from crest_trim_mesh import trim_top_crest
+        all_pts = trim_top_crest(all_pts)
+    except Exception as _e:
+        print(f"[warn] recorte de cresta omitido: {_e}")
+
     nv, nf = len(all_pts), len(all_tris)
     with open(path, 'w') as f:
         f.write("ply\nformat ascii 1.0\n")
@@ -896,6 +906,71 @@ def guardar_ply(path, pts_cm, tris, colores, simetrico=False, escala_info=""):
         for t in all_tris:
             f.write(f"3 {t[0]} {t[1]} {t[2]}\n")
     return all_pts, all_tris
+
+
+def volumen_malla_cerrada(pts, tris):
+    """Volumen encerrado (en litros) de una malla triangular cerrada.
+
+    Usa el teorema de la divergencia: el volumen con signo de cada
+    tetraedro (origen, v0, v1, v2) es (v0 · (v1 × v2)) / 6, y la suma
+    sobre todas las caras da el volumen encerrado. Se toma el valor
+    absoluto para ser robusto al sentido de las normales.
+
+    Pensado para la malla `_3d.ply` (silueta espejada en Z con
+    profundidad elíptica), que es cerrada por construcción. Puntos en
+    cm → cm³; se reporta en litros (cm³ / 1000).
+    """
+    pts = np.asarray(pts, dtype=float)
+    tris = np.asarray(tris, dtype=int)
+    if len(tris) == 0 or len(pts) < 4:
+        return 0.0
+    v0 = pts[tris[:, 0]]
+    v1 = pts[tris[:, 1]]
+    v2 = pts[tris[:, 2]]
+    vol_cm3 = np.einsum('ij,ij->i', v0, np.cross(v1, v2)).sum() / 6.0
+    return round(abs(vol_cm3) / 1000.0, 1)
+
+
+def volumen_ply_cerrado(path):
+    """Lee un PLY ASCII (formato de guardar_ply) y devuelve el volumen
+    encerrado en litros vía volumen_malla_cerrada().
+
+    Sirve para recalcular el volumen del `_3d.ply` ya escrito en disco
+    sin reconstruir la malla en memoria.
+    """
+    from pathlib import Path as _Path
+    lines = _Path(path).read_text().splitlines()
+    n_vertex = n_face = 0
+    header_end = 0
+    for i, ln in enumerate(lines):
+        if ln.startswith('element vertex'):
+            n_vertex = int(ln.split()[-1])
+        elif ln.startswith('element face'):
+            n_face = int(ln.split()[-1])
+        elif ln.strip() == 'end_header':
+            header_end = i + 1
+            break
+
+    pts = []
+    for ln in lines[header_end:header_end + n_vertex]:
+        p = ln.split()
+        if len(p) >= 3:
+            pts.append((float(p[0]), float(p[1]), float(p[2])))
+
+    tris = []
+    for ln in lines[header_end + n_vertex:header_end + n_vertex + n_face]:
+        p = ln.split()
+        if not p:
+            continue
+        k = int(p[0])
+        idx = [int(v) for v in p[1:1 + k]]
+        # Triangular en abanico cualquier cara con >3 vértices
+        for j in range(1, k - 1):
+            tris.append((idx[0], idx[j], idx[j + 1]))
+
+    if not pts or not tris:
+        return 0.0
+    return volumen_malla_cerrada(np.array(pts, dtype=float), np.array(tris, dtype=int))
 
 
 # ═══════════════════════════════════════

@@ -81,8 +81,8 @@ try:
         eye_conf_multiplier=EYE_CONF_MULTIPLIER,
         keypoint_conf_multiplier=KEYPOINT_CONF_MULTIPLIER,
         use_postes_reference=True,
-        poste1_height_cm=112,
-        poste2_height_cm=112,
+        poste1_height_cm=110,
+        poste2_height_cm=110,
         use_monocular_depth=True
     )
 except Exception as e:
@@ -125,6 +125,10 @@ _FRAME_CACHE_TTL = 300  # 5 minutes
 # ── Locked reference rectangle per video (calibración fija) ──
 # video_id → {'post1': {cx, top_tape, floor, tape_px}, 'post2': {...}}
 _locked_references = {}
+
+# Carpeta destino de "Guardar 21 frames" / list_saved_folders / saved_frame.
+# Override con env var: SAVED_FRAMES_DATASET=otra_carpeta ./run_app.sh
+SAVED_FRAMES_DATASET = os.environ.get('SAVED_FRAMES_DATASET', '12 junio')
 
 def _cache_frame(temp_path):
     """Store a frame path in cache and return its UUID."""
@@ -623,81 +627,69 @@ def detect_reference_points():
                     return bbox_y2, 0.0
 
                 def _draw_poste_with_yellow_line(bbox, label):
+                    from weight_estimation import _rotated_tape_from_roi
                     x1, y1, x2, y2 = map(int, bbox)
                     cv2.rectangle(annotated, (x1, y1), (x2, y2), highlight_color, 2)
 
-                    # Buscar el tramo rojo real dentro del bbox
                     roi = annotated[y1:y2, x1:x2]
+                    rot = None
                     if roi.size > 0:
+                        # Overlay rojo para visualizar la máscara
                         hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-                        # Rojo tiene dos rangos HSV, combinarlos
                         red_mask1 = cv2.inRange(hsv_roi, RED_HSV_LOWER1, RED_HSV_UPPER1)
                         red_mask2 = cv2.inRange(hsv_roi, RED_HSV_LOWER2, RED_HSV_UPPER2)
                         red_mask = cv2.bitwise_or(red_mask1, red_mask2)
                         grass_mask = cv2.inRange(hsv_roi, GRASS_HSV_LOWER, GRASS_HSV_UPPER)
                         red_mask = cv2.bitwise_and(red_mask, cv2.bitwise_not(grass_mask))
-                        kernel = np.ones((3, 3), np.uint8)
-                        red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
-
-                        # Overlay para visualizar qué píxeles cuentan como rojo
                         overlay = roi.copy()
-                        overlay[red_mask > 0] = (0, 0, 255)  # Rojo
+                        overlay[red_mask > 0] = (0, 0, 255)
                         roi_blend = cv2.addWeighted(roi, 0.7, overlay, 0.3, 0)
                         annotated[y1:y2, x1:x2] = roi_blend
 
-                        # Usar columnas centrales para evitar bordes
-                        col_start = int(red_mask.shape[1] * 0.4)
-                        col_end = int(red_mask.shape[1] * 0.6)
-                        center_strip = red_mask[:, col_start:col_end]
+                        # Rotated rect del tramo rojo (soporta tilt)
+                        rot = _rotated_tape_from_roi(roi, x_offset=x1, y_offset=y1)
 
-                        # Ratio de rojo por fila (evita puntos sueltos)
-                        row_ratio = np.mean(center_strip > 0, axis=1)
-                        rows_with_red = np.where(row_ratio >= 0.2)[0]
+                    if rot is None:
+                        # Fallback degradado al bbox completo (si no hay rojo claro)
+                        cx_fb = int((x1 + x2) / 2)
+                        rot = {
+                            'top_x': float(cx_fb), 'top_y': float(y1),
+                            'bot_x': float(cx_fb), 'bot_y': float(y2),
+                            'tape_px': float(abs(y2 - y1)),
+                            'angle_deg': 0.0,
+                            'rot_corners': [[float(cx_fb), float(y1)], [float(cx_fb), float(y2)],
+                                            [float(cx_fb), float(y2)], [float(cx_fb), float(y1)]],
+                        }
 
-                        if rows_with_red.size > 0:
-                            # Buscar el tramo rojo continuo empezando desde abajo
-                            y_bottom = int(rows_with_red.max())
-                            min_gap = 4  # tolerancia de filas sin rojo
-                            gap_count = 0
-                            y_top = y_bottom
+                    cx = int(round(rot['bot_x']))
+                    line_y1 = int(round(rot['top_y']))
+                    line_y2 = int(round(rot['bot_y']))
+                    top_x = int(round(rot['top_x']))
 
-                            for row in range(y_bottom, -1, -1):
-                                if row_ratio[row] >= 0.2:
-                                    y_top = row
-                                    gap_count = 0
-                                else:
-                                    gap_count += 1
-                                    if gap_count >= min_gap:
-                                        break
-
-                            line_y1 = y1 + y_top
-                            line_y2 = y1 + y_bottom
-                        else:
-                            # Fallback al bbox completo si no hay rojo detectado
-                            line_y1, line_y2 = y1, y2
-                    else:
-                        line_y1, line_y2 = y1, y2
-
-                    # Línea roja de medición (altura real roja)
-                    cx = int((x1 + x2) / 2)
-                    if line_y2 - line_y1 < 3:
-                        line_y1 = max(y1, line_y1 - 2)
-                        line_y2 = min(y2, line_y2 + 2)
-                    # Dibujo doble para que siempre se vea (borde blanco + rojo)
-                    cv2.line(annotated, (cx, line_y1), (cx, line_y2), (255, 255, 255), 4)
-                    cv2.line(annotated, (cx, line_y1), (cx, line_y2), line_color, 3)
-                    # Marcar extremos
-                    cv2.circle(annotated, (cx, line_y1), 4, line_color, -1)
+                    # Línea roja inclinada (cinta real)
+                    cv2.line(annotated, (top_x, line_y1), (cx, line_y2), (255, 255, 255), 4)
+                    cv2.line(annotated, (top_x, line_y1), (cx, line_y2), line_color, 3)
+                    cv2.circle(annotated, (top_x, line_y1), 4, line_color, -1)
                     cv2.circle(annotated, (cx, line_y2), 4, line_color, -1)
-                    height_px = abs(line_y2 - line_y1)
-                    cv2.putText(annotated, f'{label} ({height_px}px)', (x1, max(0, y1 - 10)),
+
+                    # Rotated rect en celeste (visualiza el tilt)
+                    cyan = (255, 220, 100)
+                    pts = np.array([[int(round(c[0])), int(round(c[1]))] for c in rot['rot_corners']],
+                                   dtype=np.int32)
+                    cv2.polylines(annotated, [pts], isClosed=True, color=cyan, thickness=1)
+                    if abs(rot['angle_deg']) > 1.0:
+                        cv2.putText(annotated, f"{rot['angle_deg']:+.1f}°",
+                                    (top_x + 6, line_y1 + 12),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, cyan, 1)
+
+                    height_px = float(rot['tape_px'])
+                    cv2.putText(annotated, f'{label} ({height_px:.0f}px)', (x1, max(0, y1 - 10)),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, highlight_color, 2)
 
-                    # Detectar piso (pasto) debajo del poste
+                    # Detectar piso debajo del extremo inferior real (cx, line_y2)
                     floor_y, floor_conf = _detect_floor_y(cx, line_y2, y2)
 
-                    # Dibujar línea horizontal cyan en el piso detectado
-                    floor_color = (255, 255, 0)  # cyan (BGR)
+                    floor_color = (255, 255, 0)
                     half_w = max(30, (x2 - x1))
                     cv2.line(annotated, (cx - half_w, floor_y), (cx + half_w, floor_y),
                              (0, 0, 0), 4)
@@ -710,10 +702,13 @@ def detect_reference_points():
                     return {
                         'cx': cx,
                         'top_tape': line_y1,
+                        'top_tape_x': top_x,
                         'bottom_tape': line_y2,
                         'floor': floor_y,
                         'floor_confidence': round(floor_conf, 3),
                         'tape_px': height_px,
+                        'angle_deg': float(rot['angle_deg']),
+                        'rot_corners': rot['rot_corners'],
                         'bbox': [x1, y1, x2, y2],
                     }
 
@@ -722,7 +717,7 @@ def detect_reference_points():
 
                 # Rectángulo virtual: top cinta 1/2 → piso 1/2, escala extendida con 50cm
                 if p1_info is not None and p2_info is not None and p1_info['tape_px'] > 0 and p2_info['tape_px'] > 0:
-                    TAPE_CM = 112.0
+                    TAPE_CM = 110.0
                     rect_color = (0, 255, 255)  # amarillo (BGR)
 
                     scale1 = TAPE_CM / p1_info['tape_px']  # cm/px en poste 1
@@ -931,7 +926,7 @@ def calibrate_frame():
             cv2.line(annotated_rgb, a, b, rect_color, 1)
         for p, side in [(p1, 'L'), (p2, 'R')]:
             if p['tape_px'] > 0:
-                scale = 112.0 / p['tape_px']
+                scale = 110.0 / p['tape_px']
                 h_cm = (p['floor'] - p['top_tape']) * scale
                 txt = f"{h_cm:.0f}cm"
                 ymid = (p['top_tape'] + p['floor']) // 2
@@ -949,24 +944,37 @@ def calibrate_frame():
         def _to_orig_len(l):
             return l / scale_factor if scale_factor else l
 
+        def _to_orig_corners(corners):
+            return [[round(_to_orig_x(c[0]), 1), round(_to_orig_y(c[1]), 1)] for c in corners]
+
         rectangle_ref = {
             'post1': {'cx': int(p1['cx']), 'top_tape': int(p1['top_tape']),
-                      'floor': int(p1['floor']), 'tape_px': int(p1['tape_px'])},
+                      'floor': int(p1['floor']), 'tape_px': int(p1['tape_px']),
+                      'top_tape_x': int(p1.get('top_tape_x', p1['cx'])),
+                      'angle_deg': float(p1.get('angle_deg', 0.0))},
             'post2': {'cx': int(p2['cx']), 'top_tape': int(p2['top_tape']),
-                      'floor': int(p2['floor']), 'tape_px': int(p2['tape_px'])},
+                      'floor': int(p2['floor']), 'tape_px': int(p2['tape_px']),
+                      'top_tape_x': int(p2.get('top_tape_x', p2['cx'])),
+                      'angle_deg': float(p2.get('angle_deg', 0.0))},
             # Coords en espacio ORIGINAL del video (para overlay en <video>)
             'original_coords': {
                 'post1': {
                     'cx': round(_to_orig_x(p1['cx']), 1),
                     'top_tape': round(_to_orig_y(p1['top_tape']), 1),
+                    'top_tape_x': round(_to_orig_x(p1.get('top_tape_x', p1['cx'])), 1),
                     'floor': round(_to_orig_y(p1['floor']), 1),
                     'tape_px': round(_to_orig_len(p1['tape_px']), 1),
+                    'angle_deg': float(p1.get('angle_deg', 0.0)),
+                    'rot_corners': _to_orig_corners(p1.get('rot_corners', [])),
                 },
                 'post2': {
                     'cx': round(_to_orig_x(p2['cx']), 1),
                     'top_tape': round(_to_orig_y(p2['top_tape']), 1),
+                    'top_tape_x': round(_to_orig_x(p2.get('top_tape_x', p2['cx'])), 1),
                     'floor': round(_to_orig_y(p2['floor']), 1),
                     'tape_px': round(_to_orig_len(p2['tape_px']), 1),
+                    'angle_deg': float(p2.get('angle_deg', 0.0)),
+                    'rot_corners': _to_orig_corners(p2.get('rot_corners', [])),
                 },
                 'video_w': int(w_orig),
                 'video_h': int(h_orig),
@@ -1017,6 +1025,10 @@ def generate_3d_consensus():
         cow_name_raw = (data.get('cow_name', '') or 'vaca_live').strip()
         cow_name = ''.join(c for c in cow_name_raw if c.isalnum() or c in '_-')
         altura_cm = float(data.get('altura_cm') or 0)
+        largo_cm = float(data.get('largo_cm') or 0)
+        barril_dir = (data.get('barril_dir', '') or '').strip().lower()
+        if barril_dir not in ('left', 'right'):
+            barril_dir = 'unknown'
         contours = data.get('contours') or []
 
         if not contours:
@@ -1058,55 +1070,11 @@ def generate_3d_consensus():
         width_median = float(np.median(widths_arr))
         heights_median = np.median(heights_arr, axis=0)  # (N,)
 
-        # Si tenemos tops/bottoms por sample (frames nuevos), usamos la mediana
-        # de cada uno para reconstruir la silueta REAL — la malla va a tener
-        # forma de vaca (lomo arriba, barriga abajo), no un tubo simétrico.
-        # Fallback a elipse simétrica si vienen frames viejos sin esos campos.
-        use_shape = len(tops_mat) == len(widths) and len(tops_mat) > 0
-        if use_shape:
-            tops_arr = np.array(tops_mat, dtype=float)
-            bots_arr = np.array(bottoms_mat, dtype=float)
-            tops_median = np.median(tops_arr, axis=0)
-            bots_median = np.median(bots_arr, axis=0)
-        else:
-            tops_median = None
-            bots_median = None
-
-        # Generar rebanadas del consenso
-        K_DEPTH = 0.25
-        rebanadas = []
-        for i in range(N):
-            x_cm = width_median * i / (N - 1)
-            if use_shape:
-                top_i = float(tops_median[i])
-                bot_i = float(bots_median[i])
-                h_cm = top_i - bot_i
-                if h_cm <= 0:
-                    continue
-                y_c = (top_i + bot_i) / 2.0
-            else:
-                h_cm = float(heights_median[i])
-                if h_cm <= 0:
-                    continue
-                y_c = h_cm / 2.0
-            rebanadas.append((x_cm, y_c, h_cm))
-
-        if len(rebanadas) < 3:
-            return jsonify({'success': False, 'error': 'rebanadas insuficientes'}), 400
-
-        # Volumen del consenso (integración trapezoidal)
-        vol_cm3 = 0.0
-        for i in range(len(rebanadas) - 1):
-            x0, _, h0 = rebanadas[i]
-            x1, _, h1 = rebanadas[i + 1]
-            dx = x1 - x0
-            a0, b0 = h0 / 2.0, h0 * K_DEPTH
-            a1, b1 = h1 / 2.0, h1 * K_DEPTH
-            area_avg = (np.pi * a0 * b0 + np.pi * a1 * b1) / 2.0
-            vol_cm3 += area_avg * dx
-        barril_consenso_L = round(vol_cm3 / 1000.0, 1)
-
-        # Generar malla elipsoidal con generar_ply_volumen
+        # El volumen consenso es el volumen ENCERRADO de la malla _3d.ply
+        # (silueta espejada con profundidad elíptica) que dejó
+        # /generate_3d_from_frame. Única fuente de volumen: ya no se generan
+        # rebanadas/cilindros ni _volumen.ply. La mediana multi-frame se
+        # conserva solo como metadato (ancho consenso, frames usados).
         sys_path_added = False
         try:
             import sys as _sys
@@ -1114,30 +1082,38 @@ def generate_3d_consensus():
             if _proj not in _sys.path:
                 _sys.path.insert(0, _proj)
                 sys_path_added = True
-            from generar_ply_volumen import malla_elipsoidal, escribir_ply
+            from generar_modelos3d_grandes import volumen_ply_cerrado
         finally:
             if sys_path_added:
                 _sys.path.remove(_proj)
 
-        vertices, tris = malla_elipsoidal(rebanadas, n_vert=32)
-
-        # Guardar en output_modelos3d_live/<cow_name>/
-        # NO tocamos _3d.ply ni _lateral.ply: esos vienen del frame
-        # representativo vía /generate_3d_from_frame (silueta real + colores
-        # de la imagen, estilo V1barrilbien). Acá solo escribimos _volumen.ply
-        # (malla elipsoidal del consenso multi-frame) y el resumen con el
-        # volumen consenso — que es el dato mostrado al usuario.
         proj_dir = _Path(os.path.dirname(os.path.abspath(__file__)))
         out_dir = proj_dir / MODELO_LIVE_DIR / cow_name
-        out_dir.mkdir(parents=True, exist_ok=True)
-        ply_vol = out_dir / f'{cow_name}_volumen.ply'
-        escribir_ply(ply_vol, vertices, tris,
-                     comentario=f'{cow_name} volumen consenso de {len(widths)} frames | altura={altura_cm:.1f}cm | barril={barril_consenso_L}L')
+        ply_3d = out_dir / f'{cow_name}_3d.ply'
+        if not ply_3d.is_file():
+            return jsonify({'success': False,
+                            'error': 'falta _3d.ply (genera el modelo del frame primero)'}), 400
+        barril_consenso_L = volumen_ply_cerrado(str(ply_3d))
 
+        out_dir.mkdir(parents=True, exist_ok=True)
+        # Conservar el sentido ya auto-detectado por /generate_3d_from_frame en
+        # vez de pisarlo con 'unknown' cuando el request no lo trae.
+        if barril_dir == 'unknown':
+            try:
+                _prev = out_dir / f'{cow_name}_resumen.json'
+                if _prev.is_file():
+                    with open(_prev) as _pf:
+                        _pdir = (_json.load(_pf).get('barril_dir') or 'unknown')
+                    if _pdir in ('left', 'right'):
+                        barril_dir = _pdir
+            except Exception:
+                pass
         resumen = {
             'individuo': cow_name,
             'altura_real_cm': altura_cm,
             'vol_barril_litros': barril_consenso_L,
+            'largo_cm': round(largo_cm, 1) if largo_cm > 0 else None,
+            'barril_dir': barril_dir,
             'metodo': 'consenso_multi_frame',
             'frames_usados': len(widths),
             'width_consenso_cm': round(width_median, 1),
@@ -1152,7 +1128,6 @@ def generate_3d_consensus():
             'barril_consenso_L': barril_consenso_L,
             'frames_usados': len(widths),
             'width_consenso_cm': round(width_median, 1),
-            'ply_volumen': f'{cow_name}_volumen.ply',
         })
     except Exception as e:
         import traceback
@@ -1160,11 +1135,55 @@ def generate_3d_consensus():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+def _seg_mask_crop(model, crop):
+    """Corre un modelo de segmentación sobre el crop y une las máscaras grandes."""
+    r = model(crop, conf=0.25, verbose=False)
+    if not r or r[0].masks is None or len(r[0].masks.data) == 0:
+        return None
+    m = r[0].masks.data.cpu().numpy()
+    a = np.array([float(x.sum()) for x in m])
+    if a.max() <= 0:
+        return None
+    k = a >= 0.05 * a.max()
+    s = np.max(m[k], axis=0)
+    if s.shape != crop.shape[:2]:
+        s = cv2.resize(s, (crop.shape[1], crop.shape[0]))
+    return (s > 0.5).astype(np.uint8)
+
+
+def _detectar_sentido_barril(cow_crop, barril_mask_crop):
+    """Sentido del animal a partir de las máscaras (coords del crop).
+
+    La cabeza+cuello sobresalen del barril en la mitad SUPERIOR del cuerpo: el
+    lado (izq/der) con más masa de silueta por fuera del barril es la cabeza.
+    Mismo criterio que muestra_lomo_cruz_cola.py (head_left). Devuelve
+    'left'/'right' (cabeza a ese lado) o 'unknown' si no se puede decidir.
+    """
+    if silueta_seg_model is None or barril_mask_crop is None:
+        return 'unknown'
+    sil = _seg_mask_crop(silueta_seg_model, cow_crop)
+    if sil is None:
+        return 'unknown'
+    cols = np.where(barril_mask_crop.sum(0) > 0)[0]
+    rows = np.where(barril_mask_crop.sum(1) > 0)[0]
+    if not len(cols) or not len(rows):
+        return 'unknown'
+    bxmin, bxmax = int(cols[0]), int(cols[-1])
+    btop, bbot = int(rows[0]), int(rows[-1])
+    bmid = (btop + bbot) // 2
+    lm = int(sil[btop:bmid, :bxmin].sum())
+    rm = int(sil[btop:bmid, bxmax + 1:].sum())
+    if lm == rm:
+        return 'unknown'
+    return 'left' if lm > rm else 'right'
+
+
 @app.route('/generate_3d_from_frame', methods=['POST'])
 def generate_3d_from_frame():
-    """Genera PLYs (_3d, _lateral, _volumen) de la vaca a partir del frame
+    """Genera PLYs (_3d, _lateral) de la vaca a partir del frame
     representativo + silueta_seg + locked_reference. Guarda en
     output_modelos3d_live/<cow_name>/ para que el viewer 3D lo muestre.
+    El volumen reportado es el volumen encerrado de la malla _3d.ply.
     """
     import json as _json
     from pathlib import Path as _Path
@@ -1181,6 +1200,13 @@ def generate_3d_from_frame():
         barril_L = float(barril_L_str)
     except Exception:
         barril_L = 0.0
+    try:
+        largo_cm = float(request.form.get('largo_cm', 0) or 0)
+    except Exception:
+        largo_cm = 0.0
+    barril_dir = (request.form.get('barril_dir', '') or '').strip().lower()
+    if barril_dir not in ('left', 'right'):
+        barril_dir = 'unknown'
 
     video_id = request.form.get('video_id', '').strip() or None
     inline = request.form.get('locked_reference_json', '').strip()
@@ -1249,6 +1275,21 @@ def generate_3d_from_frame():
         if cols_reparadas:
             print(f"[generate_3d_from_frame] barril reparado: {len(cols_reparadas)} columnas")
 
+        # Sentido del animal: si no vino del form, auto-detectar (silueta vs
+        # barril). El viewer lo usa para ubicar el diámetro torácico del lado de
+        # la cabeza. El PLY no espeja X, así que cabeza a la izq de la imagen =
+        # 'left' (frente en xMin del modelo).
+        if barril_dir == 'unknown':
+            try:
+                auto_dir = _detectar_sentido_barril(cow_crop, (sil_mask > 0.5).astype(np.uint8))
+                if auto_dir in ('left', 'right'):
+                    barril_dir = auto_dir
+                    print(f"[generate_3d_from_frame] sentido auto-detectado: {barril_dir}")
+                else:
+                    print("[generate_3d_from_frame] sentido no determinado (unknown)")
+            except Exception as _e:
+                print(f"[generate_3d_from_frame] auto-sentido falló: {_e}")
+
         # Calcular escala cm/px en la posición de la vaca (cow_cx, bbox_y2)
         oc = locked_reference.get('original_coords') or {}
         _p1 = oc.get('post1') if oc else locked_reference.get('post1', {})
@@ -1265,7 +1306,7 @@ def generate_3d_from_frame():
         cow_cx_val = (bx1 + bx2) / 2.0
         p_x = (cow_cx_val - _cx1) / max(1e-6, (_cx2 - _cx1))
         p_x_cl = max(0.0, min(1.0, p_x))
-        cm_per_px = (1 - p_x_cl) * (112.0 / _tape1) + p_x_cl * (112.0 / _tape2)
+        cm_per_px = (1 - p_x_cl) * (110.0 / _tape1) + p_x_cl * (110.0 / _tape2)
 
         # Extraer contorno + puntos interiores + triangulación Delaunay
         # (mismo approach que generar_modelos3d_grandes.py — silueta real, no rebanadas genéricas)
@@ -1337,7 +1378,7 @@ def generate_3d_from_frame():
             if _proj not in _sys.path:
                 _sys.path.insert(0, _proj)
                 sys_path_added = True
-            from generar_modelos3d_grandes import guardar_ply
+            from generar_modelos3d_grandes import guardar_ply, volumen_malla_cerrada
         finally:
             if sys_path_added:
                 _sys.path.remove(_proj)
@@ -1352,41 +1393,22 @@ def generate_3d_from_frame():
         guardar_ply(str(ply_lat), pts_cm, tris_arr, colores, simetrico=False,
                     escala_info=escala_info)
 
-        # 3D: silueta mirror en Z con profundidad elíptica → shell faithfull
+        # 3D: silueta mirror en Z con profundidad elíptica → shell faithfull.
+        # El volumen reportado es el volumen ENCERRADO de esta malla cerrada
+        # (única fuente de volumen; ya no se generan rebanadas/cilindros).
         ply_3d = out_dir / f'{cow_name}_3d.ply'
-        guardar_ply(str(ply_3d), pts_cm, tris_arr, colores, simetrico=True,
-                    escala_info=escala_info)
-
-        # Volumen PLY (rebanadas elípticas) desde el mismo contorno
-        sys_path_added = False
-        try:
-            if _proj not in _sys.path:
-                _sys.path.insert(0, _proj)
-                sys_path_added = True
-            from generar_ply_volumen import (
-                rebanadas_desde_contorno, malla_elipsoidal, escribir_ply,
-            )
-        finally:
-            if sys_path_added:
-                _sys.path.remove(_proj)
-
-        pts_b_cm = np.zeros_like(pts_b_px, dtype=float)
-        pts_b_cm[:, 0] = (pts_b_px[:, 0] - pts_b_px[:, 0].min()) * cm_per_px
-        pts_b_cm[:, 1] = -(pts_b_px[:, 1] - pts_b_px[:, 1].min()) * cm_per_px
-        pts_b_cm[:, 1] -= pts_b_cm[:, 1].min()
-        rebanadas = rebanadas_desde_contorno(pts_b_cm, n_slices=80)
-        ply_vol = out_dir / f'{cow_name}_volumen.ply'
-        if len(rebanadas) >= 3:
-            vertices_v, tris_v = malla_elipsoidal(rebanadas, n_vert=32)
-            escribir_ply(ply_vol, vertices_v, tris_v,
-                         comentario=f'{cow_name} volumen rebanadas')
+        pts_3d, tris_3d = guardar_ply(str(ply_3d), pts_cm, tris_arr, colores,
+                                      simetrico=True, escala_info=escala_info)
+        vol_barril_L = volumen_malla_cerrada(pts_3d, tris_3d)
 
         # Resumen JSON para que modelos_disponibles lo liste con datos
         resumen = {
             'individuo': cow_name,
             'altura_real_cm': altura_cm,
             'vol_total_litros': None,
-            'vol_barril_litros': barril_L if barril_L > 0 else None,
+            'vol_barril_litros': vol_barril_L if vol_barril_L > 0 else None,
+            'largo_cm': round(largo_cm, 1) if largo_cm > 0 else None,
+            'barril_dir': barril_dir,
             'escala_cm_px': cm_per_px,
             'metodo': 'live_from_pass',
             'generado_desde_pasada': True,
@@ -1398,7 +1420,7 @@ def generate_3d_from_frame():
             'success': True,
             'model_id': cow_name,
             'ply_3d': f'{cow_name}_3d.ply',
-            'ply_volumen': f'{cow_name}_volumen.ply',
+            'vol_barril_litros': vol_barril_L,
         })
     except Exception as e:
         import traceback
@@ -1550,10 +1572,10 @@ def generate_result_card():
 
 @app.route('/list_saved_folders', methods=['GET'])
 def list_saved_folders():
-    """Lista las carpetas en checkpoints/22abril/ con metadata (n_frames,
-    central_frame, has_locked_reference, mtime)."""
+    """Lista las carpetas en checkpoints/<SAVED_FRAMES_DATASET>/ con metadata
+    (n_frames, central_frame, has_locked_reference, mtime)."""
     proj_dir = os.path.dirname(os.path.abspath(__file__))
-    base = os.path.join(proj_dir, 'checkpoints', '22abril')
+    base = os.path.join(proj_dir, 'checkpoints', SAVED_FRAMES_DATASET)
     if not os.path.isdir(base):
         return jsonify({'success': True, 'folders': []})
     out = []
@@ -1588,14 +1610,14 @@ def list_saved_folders():
 
 @app.route('/list_saved_frames', methods=['POST'])
 def list_saved_frames():
-    """Lista los frames guardados en checkpoints/22abril/<folder>/.
+    """Lista los frames guardados en checkpoints/<SAVED_FRAMES_DATASET>/<folder>/.
     Devuelve [{file_name, frame_num, offset}] ordenado por offset (-10..+10).
     """
     folder = (request.form.get('folder', '') or '').strip()
     if not folder:
         return jsonify({'success': False, 'error': 'folder requerido'}), 400
     proj_dir = os.path.dirname(os.path.abspath(__file__))
-    full_path = os.path.join(proj_dir, 'checkpoints', '22abril', secure_filename(folder))
+    full_path = os.path.join(proj_dir, 'checkpoints', SAVED_FRAMES_DATASET, secure_filename(folder))
     if not os.path.isdir(full_path):
         return jsonify({'success': False, 'error': f'no existe {full_path}'}), 404
     items = []
@@ -1625,7 +1647,20 @@ def list_saved_frames():
                 ctx = _json.load(cf)
         except Exception:
             ctx = None
-    return jsonify({'success': True, 'folder': folder, 'frames': items, 'context': ctx})
+    feet_map_exists = os.path.exists(os.path.join(full_path, 'feet_map.png'))
+    return jsonify({'success': True, 'folder': folder, 'frames': items,
+                    'context': ctx, 'feet_map_exists': feet_map_exists})
+
+
+@app.route('/saved_feet_map/<folder>')
+def saved_feet_map(folder):
+    """Sirve el feet_map.png de una carpeta guardada."""
+    proj_dir = os.path.dirname(os.path.abspath(__file__))
+    safe_folder = secure_filename(folder)
+    full_path = os.path.join(proj_dir, 'checkpoints', SAVED_FRAMES_DATASET, safe_folder, 'feet_map.png')
+    if not os.path.exists(full_path):
+        return jsonify({'success': False, 'error': 'not found'}), 404
+    return send_file(full_path, mimetype='image/png')
 
 
 @app.route('/saved_frame/<folder>/<filename>')
@@ -1634,15 +1669,55 @@ def saved_frame(folder, filename):
     proj_dir = os.path.dirname(os.path.abspath(__file__))
     safe_folder = secure_filename(folder)
     safe_file = secure_filename(filename)
-    full_path = os.path.join(proj_dir, 'checkpoints', '22abril', safe_folder, safe_file)
+    full_path = os.path.join(proj_dir, 'checkpoints', SAVED_FRAMES_DATASET, safe_folder, safe_file)
     if not os.path.exists(full_path):
         return jsonify({'success': False, 'error': 'not found'}), 404
     return send_file(full_path, mimetype='image/jpeg')
 
 
+@app.route('/save_feet_map', methods=['POST'])
+def save_feet_map():
+    """Guarda el mapa de trayectoria de pezuñas (PNG + JSON) en la carpeta de
+    frames guardados. Cuerpo JSON: {folder, png_data_url, payload}.
+    """
+    import base64
+    try:
+        body = request.get_json(force=True)
+    except Exception:
+        return jsonify({'success': False, 'error': 'json inválido'}), 400
+    folder = (body.get('folder') or '').strip()
+    png_url = body.get('png_data_url') or ''
+    payload = body.get('payload') or {}
+    if not folder or not png_url:
+        return jsonify({'success': False, 'error': 'folder y png_data_url requeridos'}), 400
+    proj_dir = os.path.dirname(os.path.abspath(__file__))
+    full_path = os.path.join(proj_dir, 'checkpoints', SAVED_FRAMES_DATASET, secure_filename(folder))
+    if not os.path.isdir(full_path):
+        return jsonify({'success': False, 'error': f'no existe {full_path}'}), 404
+    try:
+        # Decodificar dataURL "data:image/png;base64,..."
+        if ',' in png_url:
+            _, b64 = png_url.split(',', 1)
+        else:
+            b64 = png_url
+        png_bytes = base64.b64decode(b64)
+        with open(os.path.join(full_path, 'feet_map.png'), 'wb') as f:
+            f.write(png_bytes)
+        import json as _json
+        with open(os.path.join(full_path, 'feet_map.json'), 'w') as jf:
+            _json.dump(payload, jf, indent=2)
+        return jsonify({'success': True, 'folder': folder,
+                        'png_path': os.path.join(folder, 'feet_map.png'),
+                        'json_path': os.path.join(folder, 'feet_map.json')})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/save_frames_around', methods=['POST'])
 def save_frames_around():
-    """Guarda 21 frames (central ± 10) en checkpoints/22abril/<timestamp>/.
+    """Guarda 21 frames (central ± 10) en checkpoints/<SAVED_FRAMES_DATASET>/<timestamp>/.
 
     DOS MODOS:
     1) MODO BACKEND (preferido): el cliente manda `video` (multipart) +
@@ -1672,16 +1747,37 @@ def save_frames_around():
             fps = 30.0
 
         proj_dir = os.path.dirname(os.path.abspath(__file__))
-        base = os.path.join(proj_dir, 'checkpoints', '22abril')
+        base = os.path.join(proj_dir, 'checkpoints', SAVED_FRAMES_DATASET)
         os.makedirs(base, exist_ok=True)
         ts = _dt.now().strftime('%Y%m%d_%H%M%S')
-        folder_name = f'central{central_frame}_{ts}'
-        out_dir = os.path.join(base, folder_name)
-        os.makedirs(out_dir, exist_ok=True)
 
-        saved = 0
+        # Nombre de carpeta = nombre del video (sin extensión, sanitizado).
+        # Si no viene video o el nombre está vacío → fallback central<N>_<ts>.
+        # Si la carpeta ya existe → agregar _<ts> para no pisar.
         video_file = request.files.get('video')
         WINDOW = int(request.form.get('window', '10'))
+        saved = 0
+
+        base_folder_name = None
+        # 1) Prioridad: nombre del individuo ingresado al procesar (cow_name/nombre).
+        nombre_req = (request.form.get('cow_name', '') or request.form.get('nombre', '') or '').strip()
+        if nombre_req:
+            base_folder_name = secure_filename(nombre_req) or None
+        # 2) Fallback: nombre del archivo de video.
+        if not base_folder_name and video_file is not None and video_file.filename:
+            stem = os.path.splitext(video_file.filename)[0]
+            sanitized = secure_filename(stem)
+            if sanitized:
+                base_folder_name = sanitized
+        # 3) Último recurso: central<N>_<ts>.
+        if not base_folder_name:
+            base_folder_name = f'central{central_frame}_{ts}'
+
+        out_dir = os.path.join(base, base_folder_name)
+        if os.path.exists(out_dir):
+            out_dir = os.path.join(base, f'{base_folder_name}_{ts}')
+        os.makedirs(out_dir, exist_ok=True)
+        folder_name = os.path.basename(out_dir)
 
         if video_file is not None:
             # MODO BACKEND: extraer frames del video con cv2 (calidad 95)
@@ -1828,6 +1924,7 @@ def detect_cow_fast():
         # Ajustar BOTTOM (ry2) usando silueta_seg mask (bottom = pezuñas).
         silueta_bottom_used = False
         ry2_original = ry2  # para sanity check
+        feet_points = []  # picos del borde inferior de la silueta = pezuñas
         if silueta_seg_model is not None:
             try:
                 rx1_i, ry1_i, rx2_i, ry2_i = int(rx1), int(ry1), int(rx2), int(ry2)
@@ -1864,6 +1961,47 @@ def detect_cow_fast():
                             else:
                                 print(f"[detect_cow_fast] silueta bottom rechazado: "
                                       f"diff={diff:.0f}px > max={max_diff:.0f}px")
+
+                            # Picos del borde inferior = pezuñas (2-4 según cruce de patas).
+                            try:
+                                from scipy.signal import find_peaks
+                                h_mask, w_mask = bin_sil.shape
+                                idx_grid = np.arange(h_mask).reshape(-1, 1)
+                                masked_y = np.where(bin_sil > 0, idx_grid, -1)
+                                bottom_y_per_col = masked_y.max(axis=0)  # -1 si col vacía
+                                cols_ok = np.where(bottom_y_per_col >= 0)[0]
+                                if cols_ok.size >= 10:
+                                    cmin, cmax = int(cols_ok[0]), int(cols_ok[-1])
+                                    sig = bottom_y_per_col[cmin:cmax + 1].astype(np.float32)
+                                    # Forward-fill huecos
+                                    last_v = sig[0] if sig[0] >= 0 else 0
+                                    for i in range(sig.size):
+                                        if sig[i] < 0:
+                                            sig[i] = last_v
+                                        else:
+                                            last_v = sig[i]
+                                    sil_h = max(1.0, float(sig.max() - sig.min()))
+                                    min_dist = max(8, int(0.06 * sig.size))
+                                    min_prom = max(3.0, 0.04 * sil_h)
+                                    peaks, _props = find_peaks(sig, distance=min_dist, prominence=min_prom)
+                                    print(f"[detect_cow_fast] feet: sig_len={sig.size} sil_h={sil_h:.0f} "
+                                          f"min_dist={min_dist} min_prom={min_prom:.1f} → peaks={len(peaks)}")
+                                    for pk in peaks:
+                                        x_in_crop = int(cmin + pk)
+                                        y_in_crop = int(sig[pk])
+                                        x_resized = sx1 + x_in_crop
+                                        y_resized = sy1 + y_in_crop
+                                        if scale_factor and scale_factor > 0:
+                                            xo = (x_resized - pad_x) / scale_factor
+                                            yo = (y_resized - pad_y) / scale_factor
+                                        else:
+                                            xo, yo = float(x_resized), float(y_resized)
+                                        feet_points.append({
+                                            'x': round(float(xo), 1),
+                                            'y': round(float(yo), 1),
+                                        })
+                            except Exception as _ef:
+                                print(f"[detect_cow_fast] feet detection fail: {_ef}")
             except Exception as _e:
                 print(f"[detect_cow_fast] silueta_seg fallo: {_e}")
 
@@ -2030,8 +2168,8 @@ def detect_cow_fast():
 
         # Escala en el PUNTO DE CRUCE: t es la posición a lo largo del piso, que también
         # interpola la escala entre los postes (post 1 a t=0, post 2 a t=1)
-        scale_1 = 112.0 / tape_px_1
-        scale_2 = 112.0 / tape_px_2
+        scale_1 = 110.0 / tape_px_1
+        scale_2 = 110.0 / tape_px_2
         cm_per_px = (1 - t) * scale_1 + t * scale_2
 
         if cm_per_px <= 0:
@@ -2140,7 +2278,7 @@ def detect_cow_fast():
 
         # La altura se reporta SOLO en frames con poste solapado: ahí el
         # bbox de la vaca contiene el poste cercano, así que cm_per_px en
-        # ese punto es el del poste (escala precisa, 112cm contra el mayor
+        # ese punto es el del poste (escala precisa, 110cm contra el mayor
         # tape_px). En los frames sin solapamiento no devolvemos altura;
         # esos frames van al consenso del barril.
         return jsonify({
@@ -2150,16 +2288,20 @@ def detect_cow_fast():
             'cruce_reason': cruce_reason,
             'animal_bbox_original': [x1, y1, x2, y2],
             'cow_score': cow_score,
-            'cow_height_cm': round(cow_height_cm, 1) if barril_post_overlap else None,
+            'cow_height_cm': round(cow_height_cm, 1) if within_rectangle else None,
             'cm_per_px': round(cm_per_px, 5),
             'p': round(p_x, 3),
             't_floor': round(t, 3),
             'x_cross': round(x_cross, 1) if x_cross is not None else None,
             'y_cross': round(y_cross, 1),
             'silueta_bottom_used': silueta_bottom_used,
+            'feet_points': feet_points,
             'barril_top_used': barril_top_used,
             'barril_post_overlap': barril_post_overlap,
             'barril_volumen_litros': barril_volumen_litros,
+            # Largo del box del barril (extensión horizontal de la máscara, cm).
+            # Se promedia en el cliente igual que la altura, en la misma pasada.
+            'barril_largo_cm': (barril_contour_norm['width_cm'] if barril_contour_norm else None),
             'barril_contour_norm': barril_contour_norm,  # para consenso multi-frame
             'barril_cols_rellenadas': barril_cols_rellenadas,
             'bbox_aligned_with_floor': bbox_aligned,
@@ -2539,7 +2681,7 @@ def batch_screen():
 
                     if len(postes_heights) >= 2 and animal_bbox_height_px:
                         avg_post_height_px = sum(postes_heights) / len(postes_heights)
-                        calc_cm_per_px = 112.0 / avg_post_height_px
+                        calc_cm_per_px = 110.0 / avg_post_height_px
                         cow_height_cm = animal_bbox_height_px * calc_cm_per_px
                         print(f"[BATCH_F{frame_num}] cow_height: posts={postes_heights} -> avg={avg_post_height_px:.1f}px -> cm_per_px={calc_cm_per_px:.5f} -> height={cow_height_cm:.1f}cm")
 
@@ -2878,15 +3020,34 @@ MODELO_GRANDES_DIR = 'output_modelos3d_grandes'
 MODELO_DESFILE_DIR = 'output_modelos3d_desfile26marz'
 MODELO_26MARZ_DIR = 'output_modelos3d_26marz'
 MODELO_RECORTE26MARZ_DIR = 'output_modelos3d_Recorte26marz_altdiag'
-MODELO_LIVE_DIR = 'output_modelos3d_live'
+MODELO_LIVE_DIR = 'output_modelos3d_6mayo'  # nuevo dataset 6mayo (antes: output_modelos3d_live)
+# Carpetas de modelos que el viewer 3D lista en el selector. Cambiar acá para
+# elegir qué datasets aparecen. (v6 = barril_seg.pt)
+# Solo modelos generados con el barril v8 (oculta todos los anteriores).
+# Los 4 datasets con cruz+anca manual (diámetros cruz/anca en el visor).
+MODELO_DATASET_DIRS = ['output_modelos3d_live_14mayo_v8', 'output_modelos3d_live_20mayo_v8',
+                       'output_modelos3d_live_6mayo_v8', 'output_modelos3d_live_12junio_v8']
 ALTO_ESTIMADO_DEFAULT = 120.0  # cm fallback assumed during model generation
+
+# IDs de modelos que NO se muestran en el selector del visor 3D (id = '<dataset>__<individuo>').
+# No se borra nada: solo se ocultan de la lista. Quitar de acá para volver a mostrarlos.
+MODELOS_OCULTOS = {
+    'output_modelos3d_live_12junio_v8__000_392',
+    'output_modelos3d_live_12junio_v8__000_392A',
+    'output_modelos3d_live_12junio_v8__000_448A',
+    'output_modelos3d_live_12junio_v8__000_459',
+}
 
 
 def _discover_modelo_dirs():
-    """Auto-discover model subdirectories inside all model output dirs."""
+    """Devuelve {id: ruta_relativa} de todos los modelos en MODELO_DATASET_DIRS.
+
+    El id es '<dataset>__<individuo>' para que CONVIVAN datasets que repiten el
+    mismo nombre de individuo (p.ej. barril vs silueta, 14mayo vs 14mayo_v7).
+    """
     base = os.path.dirname(os.path.abspath(__file__))
     dirs = {}
-    for model_dir in [MODELO_RECORTE26MARZ_DIR, MODELO_LIVE_DIR]:
+    for model_dir in MODELO_DATASET_DIRS:
         batch_path = os.path.join(base, model_dir)
         if os.path.isdir(batch_path):
             for entry in sorted(os.listdir(batch_path)):
@@ -2894,7 +3055,7 @@ def _discover_modelo_dirs():
                     continue
                 full = os.path.join(batch_path, entry)
                 if os.path.isdir(full):
-                    dirs[entry] = os.path.join(model_dir, entry)
+                    dirs[f"{model_dir}__{entry}"] = os.path.join(model_dir, entry)
     return dirs
 
 
@@ -2907,18 +3068,347 @@ def _load_resumen(dir_path):
     return {}
 
 
+def _resumen_path(dir_path):
+    """Ruta del *_resumen.json dentro de un directorio de modelo (o None)."""
+    for f in sorted(os.listdir(dir_path)):
+        if f.endswith('_resumen.json') or f == 'resumen.json':
+            return os.path.join(dir_path, f)
+    return None
+
+
+@app.route('/api/modelo3d/<vaca>/girth', methods=['POST'])
+def guardar_girth(vaca):
+    """Guarda la posición manual del diámetro torácico elegida en el visor 3D.
+
+    - Persiste `girth_frac_manual` en el _resumen.json del modelo (para que el
+      visor arranque en ese punto la próxima vez).
+    - Acumula una etiqueta en `girth_labels.jsonl` (dataset de entrenamiento
+      para que luego un modelo aprenda dónde va el punto).
+    Body JSON: {girth_frac, vert_cm?, depth_cm?, perim_cm?}
+    """
+    import datetime as _datetime
+    try:
+        data = request.get_json(force=True) or {}
+        if data.get('girth_frac') is None:
+            return jsonify({'success': False, 'error': 'falta girth_frac'}), 400
+        frac = float(data.get('girth_frac'))
+        if not (0.0 <= frac <= 0.5):
+            return jsonify({'success': False, 'error': 'girth_frac fuera de rango (0–0.5)'}), 400
+
+        base = os.path.dirname(os.path.abspath(__file__))
+        carpeta = _discover_modelo_dirs().get(vaca)
+        if not carpeta:
+            return jsonify({'success': False, 'error': 'modelo no encontrado'}), 404
+        dir_path = os.path.join(base, carpeta)
+
+        meta = {}
+        rpath = _resumen_path(dir_path)
+        if rpath and os.path.isfile(rpath):
+            with open(rpath) as jf:
+                meta = json.load(jf)
+        meta['girth_frac_manual'] = round(frac, 4)
+        if rpath is None:
+            rpath = os.path.join(dir_path, f'{vaca}_resumen.json')
+        with open(rpath, 'w') as jf:
+            json.dump(meta, jf, indent=2, ensure_ascii=False)
+
+        label = {
+            'individuo': vaca,
+            'dataset': carpeta.split(os.sep)[0],
+            'girth_frac': round(frac, 4),
+            'barril_dir': meta.get('barril_dir', 'unknown'),
+            'vert_cm': data.get('vert_cm'),
+            'depth_cm': data.get('depth_cm'),
+            'perim_cm': data.get('perim_cm'),
+            'ts': _datetime.datetime.now().isoformat(timespec='seconds'),
+        }
+        with open(os.path.join(base, 'girth_labels.jsonl'), 'a') as lf:
+            lf.write(json.dumps(label, ensure_ascii=False) + '\n')
+
+        return jsonify({'success': True, 'girth_frac': round(frac, 4)})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/modelo3d/<vaca>/verija', methods=['POST'])
+def guardar_verija(vaca):
+    """Guarda/corrige la posición del Diámetro Verija (desde el fondo) elegida en
+    el visor 3D. Persiste `verija_frac_manual` en el _resumen.json y acumula una
+    etiqueta en `verija_labels.jsonl` (dataset de entrenamiento).
+    Body JSON: {verija_frac, vert_cm?, depth_cm?, perim_cm?}
+    """
+    import datetime as _datetime
+    try:
+        data = request.get_json(force=True) or {}
+        if data.get('verija_frac') is None:
+            return jsonify({'success': False, 'error': 'falta verija_frac'}), 400
+        frac = float(data.get('verija_frac'))
+        if not (0.0 <= frac <= 0.5):
+            return jsonify({'success': False, 'error': 'verija_frac fuera de rango (0–0.5)'}), 400
+
+        base = os.path.dirname(os.path.abspath(__file__))
+        carpeta = _discover_modelo_dirs().get(vaca)
+        if not carpeta:
+            return jsonify({'success': False, 'error': 'modelo no encontrado'}), 404
+        dir_path = os.path.join(base, carpeta)
+
+        meta = {}
+        rpath = _resumen_path(dir_path)
+        if rpath and os.path.isfile(rpath):
+            with open(rpath) as jf:
+                meta = json.load(jf)
+        meta['verija_frac_manual'] = round(frac, 4)
+        # Subida del piso hacia adentro del barril (0–1); opcional.
+        if data.get('verija_raise') is not None:
+            raise_frac = float(data.get('verija_raise'))
+            raise_frac = min(max(raise_frac, 0.0), 1.0)
+            meta['verija_raise_manual'] = round(raise_frac, 4)
+        if rpath is None:
+            rpath = os.path.join(dir_path, f'{vaca}_resumen.json')
+        with open(rpath, 'w') as jf:
+            json.dump(meta, jf, indent=2, ensure_ascii=False)
+
+        label = {
+            'individuo': vaca,
+            'dataset': carpeta.split(os.sep)[0],
+            'verija_frac': round(frac, 4),
+            'barril_dir': meta.get('barril_dir', 'unknown'),
+            'vert_cm': data.get('vert_cm'),
+            'depth_cm': data.get('depth_cm'),
+            'perim_cm': data.get('perim_cm'),
+            'ts': _datetime.datetime.now().isoformat(timespec='seconds'),
+        }
+        with open(os.path.join(base, 'verija_labels.jsonl'), 'a') as lf:
+            lf.write(json.dumps(label, ensure_ascii=False) + '\n')
+
+        return jsonify({'success': True, 'verija_frac': round(frac, 4)})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/modelo3d/<vaca>/cruz', methods=['POST'])
+def guardar_cruz(vaca):
+    """Guarda/corrige la posición del Diámetro Cruz (desde el frente) elegida en el
+    visor 3D. El punto inicial lo pone cruz_pose.pt (`cruz_frac`); aquí se persiste
+    la corrección manual en `cruz_frac_manual` y se acumula una etiqueta en
+    `cruz_frac_labels.jsonl`.
+    Body JSON: {cruz_frac, vert_cm?, depth_cm?, perim_cm?}
+    """
+    import datetime as _datetime
+    try:
+        data = request.get_json(force=True) or {}
+        if data.get('cruz_frac') is None:
+            return jsonify({'success': False, 'error': 'falta cruz_frac'}), 400
+        frac = float(data.get('cruz_frac'))
+        if not (0.0 <= frac <= 0.5):
+            return jsonify({'success': False, 'error': 'cruz_frac fuera de rango (0–0.5)'}), 400
+
+        base = os.path.dirname(os.path.abspath(__file__))
+        carpeta = _discover_modelo_dirs().get(vaca)
+        if not carpeta:
+            return jsonify({'success': False, 'error': 'modelo no encontrado'}), 404
+        dir_path = os.path.join(base, carpeta)
+
+        meta = {}
+        rpath = _resumen_path(dir_path)
+        if rpath and os.path.isfile(rpath):
+            with open(rpath) as jf:
+                meta = json.load(jf)
+        meta['cruz_frac_manual'] = round(frac, 4)
+        if rpath is None:
+            rpath = os.path.join(dir_path, f'{vaca}_resumen.json')
+        with open(rpath, 'w') as jf:
+            json.dump(meta, jf, indent=2, ensure_ascii=False)
+
+        label = {
+            'individuo': vaca,
+            'dataset': carpeta.split(os.sep)[0],
+            'cruz_frac': round(frac, 4),
+            'barril_dir': meta.get('barril_dir', 'unknown'),
+            'vert_cm': data.get('vert_cm'),
+            'depth_cm': data.get('depth_cm'),
+            'perim_cm': data.get('perim_cm'),
+            'ts': _datetime.datetime.now().isoformat(timespec='seconds'),
+        }
+        with open(os.path.join(base, 'cruz_frac_labels.jsonl'), 'a') as lf:
+            lf.write(json.dumps(label, ensure_ascii=False) + '\n')
+
+        return jsonify({'success': True, 'cruz_frac': round(frac, 4)})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/modelo3d/<vaca>/anca', methods=['POST'])
+def guardar_anca(vaca):
+    """Guarda/corrige la posición del Diámetro Anca (desde el FONDO) elegida en el
+    visor 3D. El punto inicial lo pone la anotación manual (`anca_frac`); aquí se
+    persiste la corrección en `anca_frac_manual` y se acumula una etiqueta en
+    `anca_frac_labels.jsonl`.
+    Body JSON: {anca_frac, vert_cm?, depth_cm?, perim_cm?}
+    """
+    import datetime as _datetime
+    try:
+        data = request.get_json(force=True) or {}
+        if data.get('anca_frac') is None:
+            return jsonify({'success': False, 'error': 'falta anca_frac'}), 400
+        frac = float(data.get('anca_frac'))
+        if not (0.0 <= frac <= 0.5):
+            return jsonify({'success': False, 'error': 'anca_frac fuera de rango (0–0.5)'}), 400
+
+        base = os.path.dirname(os.path.abspath(__file__))
+        carpeta = _discover_modelo_dirs().get(vaca)
+        if not carpeta:
+            return jsonify({'success': False, 'error': 'modelo no encontrado'}), 404
+        dir_path = os.path.join(base, carpeta)
+
+        meta = {}
+        rpath = _resumen_path(dir_path)
+        if rpath and os.path.isfile(rpath):
+            with open(rpath) as jf:
+                meta = json.load(jf)
+        meta['anca_frac_manual'] = round(frac, 4)
+        if rpath is None:
+            rpath = os.path.join(dir_path, f'{vaca}_resumen.json')
+        with open(rpath, 'w') as jf:
+            json.dump(meta, jf, indent=2, ensure_ascii=False)
+
+        label = {
+            'individuo': vaca,
+            'dataset': carpeta.split(os.sep)[0],
+            'anca_frac': round(frac, 4),
+            'barril_dir': meta.get('barril_dir', 'unknown'),
+            'vert_cm': data.get('vert_cm'),
+            'depth_cm': data.get('depth_cm'),
+            'perim_cm': data.get('perim_cm'),
+            'ts': _datetime.datetime.now().isoformat(timespec='seconds'),
+        }
+        with open(os.path.join(base, 'anca_frac_labels.jsonl'), 'a') as lf:
+            lf.write(json.dumps(label, ensure_ascii=False) + '\n')
+
+        return jsonify({'success': True, 'anca_frac': round(frac, 4)})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/modelo3d/<vaca>/corte', methods=['POST'])
+def guardar_corte(vaca):
+    """Guarda el % del piso de corte (fracción de la distancia cruz↔anca, medido
+    hacia abajo desde el punto más alto del diámetro de la cruz) elegido en el
+    visor 3D. Persiste `corte_frac_manual` en el _resumen.json y acumula una
+    etiqueta en `corte_labels.jsonl`.
+    Body JSON: {corte_frac (0–1), vol_corte_litros?}
+    """
+    import datetime as _datetime
+    try:
+        data = request.get_json(force=True) or {}
+        if data.get('corte_frac') is None:
+            return jsonify({'success': False, 'error': 'falta corte_frac'}), 400
+        frac = float(data.get('corte_frac'))
+        if not (0.0 <= frac <= 1.0):
+            return jsonify({'success': False, 'error': 'corte_frac fuera de rango (0–1)'}), 400
+
+        base = os.path.dirname(os.path.abspath(__file__))
+        carpeta = _discover_modelo_dirs().get(vaca)
+        if not carpeta:
+            return jsonify({'success': False, 'error': 'modelo no encontrado'}), 404
+        dir_path = os.path.join(base, carpeta)
+
+        meta = {}
+        rpath = _resumen_path(dir_path)
+        if rpath and os.path.isfile(rpath):
+            with open(rpath) as jf:
+                meta = json.load(jf)
+        meta['corte_frac_manual'] = round(frac, 4)
+        if rpath is None:
+            rpath = os.path.join(dir_path, f'{vaca}_resumen.json')
+        with open(rpath, 'w') as jf:
+            json.dump(meta, jf, indent=2, ensure_ascii=False)
+
+        label = {
+            'individuo': vaca,
+            'dataset': carpeta.split(os.sep)[0],
+            'corte_frac': round(frac, 4),
+            'vol_corte_litros': data.get('vol_corte_litros'),
+            'ts': _datetime.datetime.now().isoformat(timespec='seconds'),
+        }
+        with open(os.path.join(base, 'corte_labels.jsonl'), 'a') as lf:
+            lf.write(json.dumps(label, ensure_ascii=False) + '\n')
+
+        return jsonify({'success': True, 'corte_frac': round(frac, 4)})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/modelo3d/<vaca>/crest_trim', methods=['POST'])
+def guardar_crest_trim(vaca):
+    """Guarda el recorte de 'cresta' (no destructivo, localizado) elegido en el
+    visor 3D. Persiste `crest_trim` en el _resumen.json:
+      {on, x_lo, x_hi (fracción desde el frente), ceil (fracción desde lo más alto)}.
+    No modifica el PLY; solo limpia yMax/diámetros/min-max al medir esa zona.
+    """
+    try:
+        data = request.get_json(force=True) or {}
+
+        def _clamp(v, lo, hi, default):
+            try:
+                return min(max(float(v), lo), hi)
+            except (TypeError, ValueError):
+                return default
+
+        crest = {
+            'on': bool(data.get('on')),
+            'x_lo': round(_clamp(data.get('x_lo'), 0.0, 1.0, 0.0), 4),
+            'x_hi': round(_clamp(data.get('x_hi'), 0.0, 1.0, 0.5), 4),
+            'ceil': round(_clamp(data.get('ceil'), 0.0, 0.5, 0.10), 4),
+        }
+
+        base = os.path.dirname(os.path.abspath(__file__))
+        carpeta = _discover_modelo_dirs().get(vaca)
+        if not carpeta:
+            return jsonify({'success': False, 'error': 'modelo no encontrado'}), 404
+        dir_path = os.path.join(base, carpeta)
+
+        meta = {}
+        rpath = _resumen_path(dir_path)
+        if rpath and os.path.isfile(rpath):
+            with open(rpath) as jf:
+                meta = json.load(jf)
+        meta['crest_trim'] = crest
+        if rpath is None:
+            rpath = os.path.join(dir_path, f'{vaca}_resumen.json')
+        with open(rpath, 'w') as jf:
+            json.dump(meta, jf, indent=2, ensure_ascii=False)
+
+        return jsonify({'success': True, 'crest_trim': crest})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/api/modelos_disponibles')
 def modelos_disponibles():
     modelos = []
     base = os.path.dirname(os.path.abspath(__file__))
     modelo_dirs = _discover_modelo_dirs()
     for vaca, carpeta in modelo_dirs.items():
+        if vaca in MODELOS_OCULTOS:
+            continue  # ocultos del selector del visor (no se listan)
         dir_path = os.path.join(base, carpeta)
         if not os.path.isdir(dir_path):
             continue
         ply_3d = None
         ply_lat = None
-        ply_vol = None
         for f in sorted(os.listdir(dir_path)):
             fl = f.lower()
             if not f.endswith('.ply'):
@@ -2926,9 +3416,7 @@ def modelos_disponibles():
             # Ignorar backups generados por el script de reparación de malla
             if '_orig.ply' in fl or fl.endswith('.bak') or '.bak.' in fl:
                 continue
-            if 'volumen' in fl:
-                ply_vol = f
-            elif 'lateral' in fl:
+            if 'lateral' in fl:
                 ply_lat = f
             elif '3d' in fl:
                 ply_3d = f
@@ -2948,12 +3436,19 @@ def modelos_disponibles():
             peso = round(float(vol_barril) * 1.03, 1)  # derivar del barril cuando no hay peso_barril guardado
         else:
             peso = meta.get('peso_kg')
+        _parts = carpeta.split(os.sep)
+        _dataset = _parts[0] if _parts else ''
+        _individuo = _parts[1] if len(_parts) > 1 else vaca
+        # etiqueta corta del dataset (saca el prefijo común)
+        _ds_label = _dataset.replace('output_modelos3d_live_', '').replace('output_modelos3d_', '')
         modelos.append({
             'id': vaca,
-            'nombre': vaca.replace('_', ' ').title(),
+            'individuo': _individuo,
+            'dataset': _dataset,
+            'dataset_label': _ds_label,
+            'nombre': _individuo,
             'ply_3d': ply_3d,
             'ply_lateral': ply_lat,
-            'ply_volumen': ply_vol,
             'escala_cm_px': meta.get('escala_cm_px'),
             'alto_estimado_cm': meta.get('altura_estimada_cm', ALTO_ESTIMADO_DEFAULT),
             'foto_usada': meta.get('foto_usada'),
@@ -2962,6 +3457,18 @@ def modelos_disponibles():
             'volumen_litros': vol,
             'vol_barril_litros': vol_barril,
             'largo_cm': meta.get('largo_cm'),
+            'barril_dir': meta.get('barril_dir', 'unknown'),
+            'girth_frac_manual': meta.get('girth_frac_manual'),
+            'girth_frac': meta.get('girth_frac'),
+            'verija_frac_manual': meta.get('verija_frac_manual'),
+            'verija_raise_manual': meta.get('verija_raise_manual'),
+            'crest_trim': meta.get('crest_trim'),
+            'cruz_frac_manual': meta.get('cruz_frac_manual'),
+            'cruz_frac': meta.get('cruz_frac'),
+            'cruz_conf': meta.get('cruz_conf'),
+            'anca_frac_manual': meta.get('anca_frac_manual'),
+            'anca_frac': meta.get('anca_frac'),
+            'corte_frac_manual': meta.get('corte_frac_manual'),
             'alto_cm': meta.get('alto_cm'),
             'superficie_cm2': meta.get('superficie_cm2'),
         })

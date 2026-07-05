@@ -13,8 +13,8 @@ Algoritmo:
 Uso:
     python reparar_hueco_malla.py input_lateral.ply output_lateral.ply
 
-Regenera la triangulación 2D. Para regenerar el _3d.ply (simétrico) y el
-_volumen.ply, ver `aplicar_reparar_test2barril.py`.
+Regenera la triangulación 2D. Para regenerar el _3d.ply (simétrico),
+ver `aplicar_reparar_test2barril.py`.
 """
 import sys
 import numpy as np

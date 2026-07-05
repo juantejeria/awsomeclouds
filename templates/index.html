@@ -190,6 +190,7 @@
                                     <button id="savedFramesRefresh" class="btn btn-sm btn-secondary">Refresh</button>
                                 </div>
                                 <div id="savedFramesMeta" style="font-size:0.85em; color:#666; margin-bottom:10px;"></div>
+                                <div id="savedFeetMapWrap" style="display:none; margin-bottom:12px; text-align:center;"></div>
                                 <div id="savedFramesGrid" style="display:grid; grid-template-columns:repeat(auto-fill, minmax(200px, 1fr)); gap:8px;"></div>
                             </div>
                         </div>
@@ -324,6 +325,46 @@
                 </div>
                 <div id="screeningSummary" style="display:none;"></div>
                 <div id="screeningGallery" class="row" style="display:none;"></div>
+                <div id="feetTrajectoryCard" style="display:none; margin-top:18px; padding-top:12px; border-top:1px solid #e0e0e0;">
+                    <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; margin-bottom:6px;">
+                        <h6 style="margin:0;">Trayectoria de pezuñas (mapa de pies)</h6>
+                        <div>
+                            <select id="feetFilterMode" class="form-select form-select-sm" style="display:inline-block; width:auto; margin-right:6px;">
+                                <option value="back" selected>Solo patas traseras</option>
+                                <option value="front">Solo patas delanteras</option>
+                                <option value="all">Todas las patas</option>
+                            </select>
+                            <button class="btn btn-control btn-sm" id="btnDownloadFeetMap" style="display:none;">
+                                <i class="fas fa-download"></i> Descargar PNG
+                            </button>
+                            <button class="btn btn-control btn-sm" id="btnDownloadFeetJson" style="display:none; margin-left:4px;">
+                                <i class="fas fa-file-code"></i> JSON
+                            </button>
+                        </div>
+                    </div>
+                    <div id="feetTrajectoryInfo" style="font-size:0.85em; color:var(--text-muted); margin-bottom:6px;"></div>
+                    <div id="feetTrajectoryWrap" style="text-align:center;"></div>
+                </div>
+                <div id="rulerCard" style="display:none; margin-top:18px; padding-top:12px; border-top:1px solid #e0e0e0;">
+                    <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; margin-bottom:6px;">
+                        <h6 style="margin:0;">Regla de medición</h6>
+                        <div style="display:flex; align-items:center; flex-wrap:wrap; gap:6px;">
+                            <select id="rulerSourceMode" class="form-select form-select-sm" style="display:inline-block; width:auto;">
+                                <option value="video" selected>Frame actual del video</option>
+                                <option value="thumb">Thumbnail procesado</option>
+                            </select>
+                            <select id="rulerThumbPick" class="form-select form-select-sm" style="display:none; width:auto;"></select>
+                            <button class="btn btn-control btn-sm" id="btnRulerCapture">
+                                <i class="fas fa-camera"></i> Capturar frame
+                            </button>
+                            <button class="btn btn-control btn-sm" id="btnRulerReset">
+                                <i class="fas fa-eraser"></i> Limpiar puntos
+                            </button>
+                        </div>
+                    </div>
+                    <div id="rulerInfo" style="font-size:0.85em; color:var(--text-muted); margin-bottom:6px;"></div>
+                    <div id="rulerWrap" style="text-align:center;"></div>
+                </div>
                 <div id="barril3dHeader" style="display:none; margin-top:18px; padding-top:12px; border-top:1px solid #e0e0e0;"></div>
                 <div id="barril3dGallery" class="row" style="display:none;"></div>
             </div>
@@ -424,6 +465,9 @@
                     <div class="viewer3d-info-row"><span class="label">Alto</span><span class="value" id="info3dAlto">-</span></div>
                     <div class="viewer3d-info-row"><span class="label">Volumen Barril</span><span class="value" id="info3dVolumen">-</span></div>
                     <div class="viewer3d-info-row"><span class="label">Superficie</span><span class="value" id="info3dSuperficie">-</span></div>
+                    <div class="viewer3d-info-row" style="border-top:1px solid #444; margin-top:4px; padding-top:4px;"><span class="label" style="color:#ff6666;">⌀ Diám. vert.</span><span class="value" id="info3dGirthVert">-</span></div>
+                    <div class="viewer3d-info-row"><span class="label" style="color:#6699ff;">⌀ Profundidad</span><span class="value" id="info3dGirthDepth">-</span></div>
+                    <div class="viewer3d-info-row"><span class="label" style="color:#ffcc00;">Perím. torácico</span><span class="value" id="info3dGirthPerim">-</span></div>
                 </div>
             </div>
             <div class="agro-card-footer">
@@ -443,17 +487,6 @@
                         </button>
                     </div>
                     <div class="d-flex align-items-center" style="gap: 4px;">
-                        <button class="btn btn-control btn-layer active" data-layer="contorno" title="Solo contorno">
-                            Contorno
-                        </button>
-                        <button class="btn btn-control btn-layer" data-layer="volumen" title="Volumen (rebanadas elipticas)">
-                            Volumen
-                        </button>
-                        <button class="btn btn-control btn-layer" data-layer="ambos" title="Contorno semi-transparente + volumen">
-                            Ambos
-                        </button>
-                    </div>
-                    <div class="d-flex align-items-center" style="gap: 4px;">
                         <button class="btn btn-control btn-render active" data-mode="solid" title="Solido">
                             <i class="fas fa-square"></i>
                         </button>
@@ -466,6 +499,110 @@
                         <button class="btn btn-control" id="btnResetVista" title="Reset vista">
                             <i class="fas fa-sync-alt"></i>
                         </button>
+                    </div>
+                </div>
+                <!-- ══ Diámetros CRUZ + ANCA (desde puntos anotados) ══ -->
+                <div class="d-flex align-items-center flex-wrap mt-2" style="gap:10px; color:#ccc; font-size:0.8em;">
+                    <label style="margin:0; display:flex; align-items:center; gap:5px; white-space:nowrap;">
+                        <input type="checkbox" id="girthToggle" checked> Mostrar diámetros (cruz + anca)
+                    </label>
+                    <span style="white-space:nowrap;">Frente: <strong id="girthDirLabel">-</strong></span>
+                </div>
+                <!-- CRUZ (desde el frente) — FIJO (no editable) -->
+                <div class="d-flex align-items-center flex-wrap mt-2" style="gap:10px; color:#ccc; font-size:0.8em;">
+                    <span style="white-space:nowrap; color:#00e5ff;"><i class="fas fa-ring"></i> Diámetro Cruz <span style="color:#789; font-size:0.9em;">(fijo)</span></span>
+                    <span style="white-space:nowrap;">desde el frente: <strong id="cruzPosLabel">20%</strong></span>
+                    <input type="range" id="cruzPosSlider" min="0" max="50" value="20" step="1" disabled
+                           style="flex:1; min-width:110px; opacity:0.5; cursor:not-allowed;" title="Punto de la cruz fijo (no editable)">
+                    <button id="cruzSaveBtn" class="btn btn-sm" disabled style="white-space:nowrap; background:#445; color:#889; cursor:not-allowed;"
+                            title="Punto de la cruz fijo (no editable)">
+                        <i class="fas fa-lock"></i> Cruz fija
+                    </button>
+                    <span style="white-space:nowrap;">alto <strong id="info3dCruzVert">-</strong> ·
+                        perím <strong id="info3dCruzPerim">-</strong></span>
+                </div>
+                <!-- ANCA (desde el fondo) — FIJO (no editable) -->
+                <div class="d-flex align-items-center flex-wrap mt-2" style="gap:10px; color:#ccc; font-size:0.8em;">
+                    <span style="white-space:nowrap; color:#ff44ff;"><i class="fas fa-ring"></i> Diámetro Anca <span style="color:#789; font-size:0.9em;">(fijo)</span></span>
+                    <span style="white-space:nowrap;">desde el fondo: <strong id="ancaPosLabel">25%</strong></span>
+                    <input type="range" id="ancaPosSlider" min="0" max="50" value="25" step="1" disabled
+                           style="flex:1; min-width:110px; opacity:0.5; cursor:not-allowed;" title="Punto de la anca fijo (no editable)">
+                    <button id="ancaSaveBtn" class="btn btn-sm" disabled style="white-space:nowrap; background:#445; color:#889; cursor:not-allowed;"
+                            title="Punto de la anca fijo (no editable)">
+                        <i class="fas fa-lock"></i> Anca fija
+                    </button>
+                    <span style="white-space:nowrap;">alto <strong id="info3dAncaVert">-</strong> ·
+                        perím <strong id="info3dAncaPerim">-</strong></span>
+                </div>
+                <!-- VERIJA (piso, desde el fondo) — MOVIBLE y guardable -->
+                <div class="d-flex align-items-center flex-wrap mt-2" style="gap:10px; color:#ccc; font-size:0.8em;">
+                    <span style="white-space:nowrap; color:#ff7043;"><i class="fas fa-ring"></i> Piso verija</span>
+                    <span style="white-space:nowrap;">piso: <strong id="verijaRaiseLabel">50%</strong></span>
+                    <input type="range" id="verijaRaiseSlider" min="0" max="100" value="50" step="1"
+                           style="flex:1; min-width:110px;" title="Piso de la verija: 0% = debajo del barril (afuera), 50% = fondo de la panza, 100% = tope del barril (adentro)">
+                    <button id="verijaSaveBtn" class="btn btn-sm" style="white-space:nowrap; background:#ff7043; color:#000;"
+                            title="Guarda/corrige el punto del piso de la verija para este individuo">
+                        <i class="fas fa-save"></i> Guardar verija
+                    </button>
+                </div>
+                <!-- RECORTE DE CRESTA (no destructivo, localizado) -->
+                <div class="d-flex align-items-center flex-wrap mt-2" style="gap:10px; color:#ccc; font-size:0.8em;">
+                    <label style="margin:0; display:flex; align-items:center; gap:5px; white-space:nowrap; color:#ff3030;">
+                        <input type="checkbox" id="crestTrimToggle"> <i class="fas fa-cut"></i> Recortar cresta
+                    </label>
+                    <span style="white-space:nowrap;" title="Altura del techo desde lo más alto del modelo: se ignora lo que quede por encima dentro de la zona">
+                        techo: <strong id="crestCeilLabel">10%</strong></span>
+                    <input type="range" id="crestCeilSlider" min="0" max="50" value="10" step="1"
+                           style="flex:1; min-width:80px;" title="Altura del techo (desde arriba). Bajá hasta justo debajo de la cresta.">
+                    <span style="white-space:nowrap;" title="Inicio de la zona a lo largo del cuerpo, desde el FRENTE">
+                        zona: <strong id="crestXLoLabel">0%</strong></span>
+                    <input type="range" id="crestXLoSlider" min="0" max="100" value="0" step="1"
+                           style="flex:1; min-width:80px;" title="Inicio de la zona (desde el frente)">
+                    <span style="white-space:nowrap;">→ <strong id="crestXHiLabel">50%</strong></span>
+                    <input type="range" id="crestXHiSlider" min="0" max="100" value="50" step="1"
+                           style="flex:1; min-width:80px;" title="Fin de la zona (desde el frente)">
+                    <button id="crestTrimSaveBtn" class="btn btn-sm" style="white-space:nowrap; background:#ff3030; color:#fff;"
+                            title="Guarda el recorte de cresta para este individuo">
+                        <i class="fas fa-save"></i> Guardar recorte
+                    </button>
+                </div>
+                <!-- ══ CHECKLIST de medidas cruz ↔ anca ══ -->
+                <div class="mt-2 p-2" style="background:#0d1b2a; border-radius:6px; color:#ccc; font-size:0.8em;">
+                    <div style="color:#9cf; font-weight:bold; margin-bottom:4px;">Medidas cruz ↔ anca</div>
+                    <div class="d-flex flex-wrap" style="gap:6px 18px;">
+                        <span>⌀ Diám. cruz: <strong id="info3dDiamCruz" style="color:#00e5ff;">-</strong></span>
+                        <span>⌀ Diám. anca: <strong id="info3dDiamAnca" style="color:#ff44ff;">-</strong></span>
+                        <span>Distancia: <strong id="info3dDist">-</strong></span>
+                        <span>Distancia × 1.5: <strong id="info3dDist15">-</strong></span>
+                    </div>
+                    <div class="d-flex flex-wrap align-items-center mt-1" style="gap:6px 18px;">
+                        <label style="margin:0; display:flex; align-items:center; gap:5px; color:#ff7043;"
+                               title="El piso de la verija está siempre visible">
+                            <input type="checkbox" id="floorToggle" checked disabled> Piso verija (siempre visible)
+                        </label>
+                        <span title="Volumen cruz↔anca recortado en el mínimo de la verija">
+                            Vol. piso verija: <strong id="info3dVolVerija" style="color:#ff7043;">-</strong></span>
+                        <label style="margin:0; display:flex; align-items:center; gap:5px; color:#ffd180;"
+                               title="Muestra el plano de corte a N% de la distancia cruz↔anca, medido hacia abajo desde el punto más alto del diámetro de la cruz">
+                            <input type="checkbox" id="floorMidToggle" checked> Ver piso corte
+                        </label>
+                        <span style="white-space:nowrap; color:#ffd180;"
+                              title="Porcentaje de la distancia cruz↔anca, medido hacia abajo desde lo más alto del diámetro de la cruz">
+                            Corte: <input type="number" id="midFloorPctInput" min="0" max="100" value="50" step="1"
+                                   style="width:56px; background:#1a2b3a; color:#ffd180; border:1px solid #ffd180; border-radius:4px; padding:1px 4px;">% ·dist
+                        </span>
+                        <button id="corteSaveBtn" class="btn btn-sm" style="white-space:nowrap; background:#ffd180; color:#000;"
+                                title="Guarda/corrige el % del piso de corte para este individuo">
+                            <i class="fas fa-save"></i> Guardar corte
+                        </button>
+                        <span title="Volumen cruz↔anca con piso al corte N%·dist desde lo alto de la cruz">
+                            Vol. corte: <strong id="info3dVolMid" style="color:#ffd180;">-</strong></span>
+                        <label style="margin:0; display:flex; align-items:center; gap:5px; color:#9f6;"
+                               title="Muestra los 2 planos límite del tramo central (±1/8 de la distancia desde el punto medio)">
+                            <input type="checkbox" id="centralToggle"> Ver tramo central
+                        </label>
+                        <span title="Volumen del tramo central (punto medio ±1/8×distancia), sin piso">
+                            Vol. central s/piso (±1/8): <strong id="info3dVolCentral" style="color:#9f6;">-</strong></span>
                     </div>
                 </div>
             </div>

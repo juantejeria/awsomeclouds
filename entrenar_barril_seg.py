@@ -7,8 +7,10 @@ Fine-tunea yolov8s-seg.pt para predecir clase 0 = "barril".
 Uso:
     python3 entrenar_barril_seg.py          # preparar dataset + entrenar
     python3 entrenar_barril_seg.py --solo-dataset   # solo preparar dataset
+    python3 entrenar_barril_seg.py --out-name barril_seg_v7.pt --run-name barril_seg_v7
 """
 
+import argparse
 import cv2
 import numpy as np
 import json
@@ -156,7 +158,7 @@ names:
     return yaml_path
 
 
-def entrenar(yaml_path):
+def entrenar(yaml_path, out_name='barril_seg.pt', run_name='barril_seg'):
     """Fine-tunea yolov8s-seg para segmentar el barril."""
     from ultralytics import YOLO
 
@@ -164,6 +166,7 @@ def entrenar(yaml_path):
     # El fine-tune de yolov8s-seg arrastra el sesgo de detectar "vaca entera"
     base_model = PROJECT / 'yolov8n-seg.pt'
     print(f"\nBase model: {base_model}")
+    print(f"Run name: {run_name} | salida: {out_name}")
     print("Iniciando entrenamiento (freeze backbone para reducir sesgo COCO)...\n")
 
     model = YOLO(str(base_model))
@@ -176,10 +179,10 @@ def entrenar(yaml_path):
         patience=40,
         save=True,
         project=str(PROJECT / 'runs_barril'),
-        name='barril_seg',
+        name=run_name,
         exist_ok=True,
         lr0=0.005,
-        # Augmentations más agresivas para 72 imágenes
+        # Augmentations agresivas (originalmente calibrado para ~72 imgs)
         hsv_h=0.02,
         hsv_s=0.5,
         hsv_v=0.4,
@@ -193,8 +196,8 @@ def entrenar(yaml_path):
     )
 
     # Copiar mejor modelo
-    best = PROJECT / 'runs_barril' / 'barril_seg' / 'weights' / 'best.pt'
-    dst = PROJECT / 'barril_seg.pt'
+    best = PROJECT / 'runs_barril' / run_name / 'weights' / 'best.pt'
+    dst = PROJECT / out_name
     if best.exists():
         shutil.copy2(str(best), str(dst))
         print(f"\n{'='*50}")
@@ -207,11 +210,15 @@ def entrenar(yaml_path):
 
 
 if __name__ == '__main__':
-    solo_dataset = '--solo-dataset' in sys.argv
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--solo-dataset', action='store_true', help='Solo prepara dataset, no entrena')
+    parser.add_argument('--out-name', default='barril_seg.pt', help='Nombre del .pt final en raíz del proyecto')
+    parser.add_argument('--run-name', default='barril_seg', help='Subcarpeta dentro de runs_barril/')
+    args = parser.parse_args()
 
     yaml_path = preparar_dataset()
 
-    if not solo_dataset:
-        entrenar(yaml_path)
+    if not args.solo_dataset:
+        entrenar(yaml_path, out_name=args.out_name, run_name=args.run_name)
     else:
         print("\n--solo-dataset: dataset preparado, no se entrena.")

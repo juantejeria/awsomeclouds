@@ -134,7 +134,9 @@ class DepthEstimator:
         results = None
         _sticker_conf = min(self.conf_threshold, 0.10)
         if self.sticker_model is not None:
-            results = self.sticker_model(image, save=False, conf=_sticker_conf, iou=self.iou_threshold)
+            # IoU bajo (0.25) para que YOLO no fusione 2 postes cercanos en una sola detección.
+            _sticker_iou = min(self.iou_threshold, 0.25)
+            results = self.sticker_model(image, save=False, conf=_sticker_conf, iou=_sticker_iou)
 
         # Detectar cuánto rojo hay en la imagen completa para ajustar umbral
         hsv_full = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
@@ -188,14 +190,29 @@ class DepthEstimator:
                         if score > 0.3 and bbox_ratio < 0.15:
                             adjusted_threshold = yellow_ratio_threshold * 0.3
 
-                        # Validar aspect ratio: cintas verticales deben ser al menos 3.5x más altas que anchas
+                        # Validar aspect ratio. Para soportar postes inclinados,
+                        # usamos el rotated rect del rojo dentro del bbox: aspect =
+                        # lado mayor / lado menor del rect rotado (inmune al tilt).
+                        # Si no hay contorno claro, caemos al axis-aligned.
                         bw = x2 - x1
                         bh = y2 - y1
                         aspect = float(bh) / float(max(1, bw))
-                        if aspect < 3.5:
+                        rot_aspect = aspect
+                        try:
+                            cnts_a, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                            if cnts_a:
+                                cnt_a = max(cnts_a, key=cv2.contourArea)
+                                if cv2.contourArea(cnt_a) >= 10:
+                                    (_c, (rw, rh), _ang) = cv2.minAreaRect(cnt_a)
+                                    long_side = max(rw, rh)
+                                    short_side = max(1.0, min(rw, rh))
+                                    rot_aspect = float(long_side / short_side)
+                        except Exception:
+                            pass
+                        if rot_aspect < 3.5:
                             print(
                                 f"[DEPTH] Poste YOLO rechazado por aspect ratio: "
-                                f"bbox={[x1, y1, x2, y2]} score={score:.3f} aspect={aspect:.2f} < 3.5"
+                                f"bbox={[x1, y1, x2, y2]} score={score:.3f} aspect_axis={aspect:.2f} aspect_rot={rot_aspect:.2f} < 3.5"
                             )
                             continue
 
@@ -227,9 +244,10 @@ class DepthEstimator:
         if postes_color:
             postes.extend(postes_color)
 
-        # 3) Deduplicar con NMS/IoU simple
+        # 3) Deduplicar con NMS/IoU simple. Threshold bajo (0.20) para no descartar
+        # un poste cercano cuyo bbox toca al del otro.
         _n_before_nms = len(postes)
-        postes = self._nms_postes(postes, iou_threshold=0.35)
+        postes = self._nms_postes(postes, iou_threshold=0.20)
         print(f"[DEPTH] detect_postes_all: after NMS {_n_before_nms} -> {len(postes)} postes")
         postes.sort(key=lambda p: (p.get('score', 0.0), p.get('yellow_ratio', 0.0)), reverse=True)
         return postes
@@ -252,10 +270,11 @@ class DepthEstimator:
         grass = cv2.inRange(hsv, self._grass_hsv_lower, self._grass_hsv_upper)
         red_mask = cv2.bitwise_and(red_mask, cv2.bitwise_not(grass))
 
-        # Morfología: unir segmentos verticales y limpiar ruido
-        kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+        # Morfología: unir segmentos verticales y limpiar ruido. Kernel CLOSE chico
+        # para no fusionar postes cercanos (gaps de hasta ~3 px se cierran).
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
         kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel_close, iterations=2)
+        red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel_close, iterations=1)
         red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel_open, iterations=1)
 
         contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -281,9 +300,16 @@ class DepthEstimator:
                 print(f"[DEPTH] color_fallback: REJECTED height too small: bbox=[{x},{y},{x+bw},{y+bh}] bh={bh} < {min_height}")
                 continue
 
-            aspect = float(bh) / float(max(1, bw))
-            if aspect < 3.5:  # Cintas verticales: al menos 3.5x más altas que anchas
-                print(f"[DEPTH] color_fallback: REJECTED aspect ratio: bbox=[{x},{y},{x+bw},{y+bh}] aspect={aspect:.2f} < 3.5")
+            # Aspect ratio del rotated rect (soporta tilt).
+            # Cintas chicas (<30 px) sufren cuantización de pixel → umbral más bajo.
+            aspect_axis = float(bh) / float(max(1, bw))
+            try:
+                (_c, (rw, rh), _ang) = cv2.minAreaRect(cnt)
+                aspect = float(max(rw, rh) / max(1.0, min(rw, rh)))
+            except Exception:
+                aspect = aspect_axis
+            if aspect < 3.5:  # Cintas: largo/ancho >= 3.5 sobre el rect rotado
+                print(f"[DEPTH] color_fallback: REJECTED aspect ratio: bbox=[{x},{y},{x+bw},{y+bh}] aspect_axis={aspect_axis:.2f} aspect_rot={aspect:.2f} < 3.5")
                 continue
 
             # Rechazar si es demasiado ancho (no puede ser una cinta)

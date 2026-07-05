@@ -27,6 +27,8 @@ _ap.add_argument('--min-cov-x', type=float, default=55.0,
                  help='Cobertura X mínima en %% para incluir el frame en el consenso.')
 _ap.add_argument('--out-tag', default='filtrado',
                  help='Subdirectorio base: output_modelos3d_live_<tag>/')
+_ap.add_argument('--barril-model', default='barril_seg.pt',
+                 help='.pt del modelo de segmentación de barril (relativo al proyecto o ruta absoluta)')
 _args = _ap.parse_args()
 folder = Path(_args.folder)
 altura_cm = _args.altura_cm
@@ -38,8 +40,12 @@ if not folder.is_dir():
     print(f"[error] no existe: {folder}"); sys.exit(1)
 
 proj_dir = Path(__file__).parent
-print("[init] cargando modelos...")
-barril_model = YOLO(str(proj_dir / 'barril_seg.pt'))
+_barril_arg = Path(_args.barril_model)
+barril_path = _barril_arg if _barril_arg.is_absolute() else (proj_dir / _barril_arg)
+if not barril_path.exists():
+    print(f"[error] modelo barril no existe: {barril_path}"); sys.exit(1)
+print(f"[init] cargando modelos... (barril={barril_path.name})")
+barril_model = YOLO(str(barril_path))
 coco_model = YOLO(str(proj_dir / 'yolov8n.pt'))
 
 
@@ -195,31 +201,7 @@ widths = [c['width_cm'] for c in contornos]
 width_env = max(widths)
 
 
-def _vol(heights, width, k=0.25):
-    dx = width / (N - 1)
-    v = 0.0
-    for h in heights:
-        if h <= 0: continue
-        v += np.pi * (h/2.0) * (h*k) * dx
-    return round(v / 1000.0, 1)
-
-
-# Variantes para comparar
-heights_med, heights_p75 = [], []
-for i in range(N):
-    hs = sorted([c['heights_cm'][i] for c in contornos if c['heights_cm'][i] > 0])
-    if not hs:
-        heights_med.append(0); heights_p75.append(0); continue
-    heights_med.append(hs[len(hs)//2])
-    heights_p75.append(hs[int(0.75*(len(hs)-1))])
-ws = sorted(widths)
-vol_med = _vol(heights_med, ws[len(ws)//2])
-vol_p75 = _vol(heights_p75, ws[int(0.75*(len(ws)-1))])
-vol_env = _vol(h_env, width_env)
-print(f"\n  A (mediana):  {vol_med} L")
-print(f"  B (p75):      {vol_p75} L")
-print(f"  E (envelope): {vol_env} L  ← usado para los PLYs")
-print(f"  width env:    {width_env:.1f} cm")
+print(f"\n  width env:    {width_env:.1f} cm")
 print(f"  alto max:     {max(h_env):.1f} cm")
 
 
@@ -268,8 +250,7 @@ print(f"[malla] {len(all_px)} verts, {len(tris_arr)} triángulos")
 
 # 5. Generar PLYs
 sys.path.insert(0, str(proj_dir))
-from generar_modelos3d_grandes import guardar_ply
-from generar_ply_volumen import rebanadas_desde_contorno, malla_elipsoidal, escribir_ply
+from generar_modelos3d_grandes import guardar_ply, volumen_malla_cerrada
 
 out_dir = proj_dir / f'output_modelos3d_live_{out_tag}' / cow_name
 out_dir.mkdir(parents=True, exist_ok=True)
@@ -280,18 +261,14 @@ guardar_ply(str(ply_lat), all_px, tris_arr, colores, simetrico=False,
             escala_info=f'Consenso E envelope | n={len(contornos)} frames | alto={altura_cm:.1f}cm')
 print(f"[ply] lateral → {ply_lat}")
 
+# 3D: malla cerrada (silueta espejada). Su volumen encerrado es el volumen
+# reportado — única fuente de volumen (sin rebanadas/cilindros).
 ply_3d = out_dir / f'{cow_name}_3d.ply'
-guardar_ply(str(ply_3d), all_px, tris_arr, colores, simetrico=True,
-            escala_info=f'Consenso E envelope | alto={altura_cm:.1f}cm')
+pts_3d, tris_3d = guardar_ply(str(ply_3d), all_px, tris_arr, colores, simetrico=True,
+                              escala_info=f'Consenso E envelope | alto={altura_cm:.1f}cm')
+vol_barril = volumen_malla_cerrada(pts_3d, tris_3d)
 print(f"[ply] 3d      → {ply_3d}")
-
-ply_vol = out_dir / f'{cow_name}_volumen.ply'
-rebanadas = rebanadas_desde_contorno(contorno_cm, n_slices=80)
-if len(rebanadas) >= 3:
-    verts_v, tris_v = malla_elipsoidal(rebanadas, n_vert=32)
-    escribir_ply(ply_vol, verts_v, tris_v,
-                 comentario=f'{cow_name} envelope ({len(contornos)} frames, {vol_env}L)')
-    print(f"[ply] volumen → {ply_vol}")
+print(f"[volumen] malla cerrada _3d.ply: {vol_barril} L")
 
 
 # 6. Resumen
@@ -306,10 +283,7 @@ resumen = {
     'cm_per_px_min': round(min(c['cm_per_px'] for c in contornos), 5),
     'cm_per_px_max': round(max(c['cm_per_px'] for c in contornos), 5),
     'cm_per_px_median': round(float(np.median([c['cm_per_px'] for c in contornos])), 5),
-    'vol_barril_litros': vol_env,
-    'vol_consenso_A_mediana': vol_med,
-    'vol_consenso_B_p75': vol_p75,
-    'vol_consenso_E_envelope': vol_env,
+    'vol_barril_litros': vol_barril,
     'width_consenso_cm': round(width_env, 1),
     'alto_max_consenso_cm': round(max(h_env), 1),
 }

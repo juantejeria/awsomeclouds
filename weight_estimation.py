@@ -40,6 +40,65 @@ _EXCLUDE_GRASS_FROM_RED_LOWER = np.array([21, 38, 123])
 _EXCLUDE_GRASS_FROM_RED_UPPER = np.array([30, 115, 255])
 
 
+def _rotated_tape_from_roi(roi_bgr, x_offset=0, y_offset=0):
+    """Detecta la cinta roja como rectángulo rotado (no axis-aligned).
+    Devuelve dict con los 2 extremos del eje largo del rect (top y bottom),
+    el largo diagonal real (tape_px), el ángulo respecto a la vertical y
+    los 4 corners en coords absolutas. None si no hay contorno válido.
+
+    Soporta postes inclinados: el bbox axis-aligned tradicional sub-mide la
+    cinta cuando está inclinada; el rotated rect preserva el largo real.
+    """
+    if roi_bgr is None or roi_bgr.size == 0:
+        return None
+    hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
+    red1 = cv2.inRange(hsv, _RED_HSV_LOWER1, _RED_HSV_UPPER1)
+    red2 = cv2.inRange(hsv, _RED_HSV_LOWER2, _RED_HSV_UPPER2)
+    red = cv2.bitwise_or(red1, red2)
+    grass = cv2.inRange(hsv, _EXCLUDE_GRASS_FROM_RED_LOWER, _EXCLUDE_GRASS_FROM_RED_UPPER)
+    red = cv2.bitwise_and(red, cv2.bitwise_not(grass))
+    red = cv2.morphologyEx(red, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8), iterations=1)
+
+    contours, _ = cv2.findContours(red, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    # Combinar todos los contornos significativos para cubrir cintas fragmentadas
+    # (la línea quedaba corta cuando agarrábamos solo el mayor blob).
+    valid_cnts = [c for c in contours if cv2.contourArea(c) >= 4]
+    if not valid_cnts:
+        return None
+    all_pts = np.concatenate([c.reshape(-1, 2) for c in valid_cnts], axis=0).astype(np.float32)
+    if all_pts.shape[0] < 4:
+        return None
+    rot = cv2.minAreaRect(all_pts)
+    box = cv2.boxPoints(rot)
+    box = np.array(box, dtype=np.float32)
+    edges = [(box[i], box[(i + 1) % 4]) for i in range(4)]
+    edge_lens = [float(np.linalg.norm(b - a)) for a, b in edges]
+    short_idx = sorted(range(4), key=lambda i: edge_lens[i])[:2]
+    end_midpts = [(edges[i][0] + edges[i][1]) / 2.0 for i in short_idx]
+    if end_midpts[0][1] < end_midpts[1][1]:
+        top_end, bot_end = end_midpts[0], end_midpts[1]
+    else:
+        top_end, bot_end = end_midpts[1], end_midpts[0]
+    tape_px = float(np.linalg.norm(bot_end - top_end))
+    if tape_px < 5:
+        return None
+    dx = float(top_end[0] - bot_end[0])
+    dy_up = float(bot_end[1] - top_end[1])
+    angle_deg = float(np.degrees(np.arctan2(dx, max(1e-3, dy_up))))
+    abs_corners = [[float(c[0] + x_offset), float(c[1] + y_offset)] for c in box.tolist()]
+    return {
+        'top_x': float(top_end[0] + x_offset),
+        'top_y': float(top_end[1] + y_offset),
+        'bot_x': float(bot_end[0] + x_offset),
+        'bot_y': float(bot_end[1] + y_offset),
+        'tape_px': tape_px,
+        'angle_deg': angle_deg,
+        'rot_corners': abs_corners,
+    }
+
+
 def _find_red_tape_rows(roi_bgr):
     """Dentro del ROI del bbox del poste, busca el tramo vertical rojo continuo
     empezando desde abajo. Retorna (y_top, y_bottom) relativos al ROI, o None.
@@ -185,24 +244,49 @@ def _draw_tape_and_floor_on(image_rgb, bbox):
     # image_rgb es RGB. Para HSV necesitamos BGR o RGB → convertimos el ROI.
     roi_rgb = image_rgb[y1:y2, x1:x2]
     roi_bgr = cv2.cvtColor(roi_rgb, cv2.COLOR_RGB2BGR)
-    tape = _find_red_tape_rows(roi_bgr)
-    cx = (x1 + x2) // 2
-    if tape is None:
-        return None
-    y_top_rel, y_bot_rel = tape
-    line_y1 = y1 + y_top_rel
-    line_y2 = y1 + y_bot_rel
 
-    # Línea roja central de la cinta
-    red_color = (255, 0, 0)  # RGB rojo
-    cv2.line(image_rgb, (cx, line_y1), (cx, line_y2), red_color, 1)
-    cv2.circle(image_rgb, (cx, line_y1), 2, red_color, -1)
+    rot = _rotated_tape_from_roi(roi_bgr, x_offset=x1, y_offset=y1)
+    if rot is None:
+        # Fallback al método axis-aligned si el rotated falla
+        tape = _find_red_tape_rows(roi_bgr)
+        cx = (x1 + x2) // 2
+        if tape is None:
+            return None
+        y_top_rel, y_bot_rel = tape
+        line_y1 = y1 + y_top_rel
+        line_y2 = y1 + y_bot_rel
+        rot = {
+            'top_x': float(cx), 'top_y': float(line_y1),
+            'bot_x': float(cx), 'bot_y': float(line_y2),
+            'tape_px': float(abs(line_y2 - line_y1)),
+            'angle_deg': 0.0,
+            'rot_corners': [[float(cx), float(line_y1)], [float(cx), float(line_y2)],
+                            [float(cx), float(line_y2)], [float(cx), float(line_y1)]],
+        }
+
+    cx = int(round(rot['bot_x']))
+    line_y1 = int(round(rot['top_y']))
+    line_y2 = int(round(rot['bot_y']))
+    top_x = int(round(rot['top_x']))
+
+    # Cinta roja inclinada: línea entre los 2 extremos del rect rotado
+    red_color = (255, 0, 0)
+    cv2.line(image_rgb, (top_x, line_y1), (cx, line_y2), red_color, 1)
+    cv2.circle(image_rgb, (top_x, line_y1), 2, red_color, -1)
     cv2.circle(image_rgb, (cx, line_y2), 2, red_color, -1)
 
-    # Nuevo setup: franja roja llega hasta el piso → floor = bottom_tape
+    # Rotated rect en celeste para que se vea el tilt
+    cyan = (100, 220, 255)
+    pts = np.array([[int(round(c[0])), int(round(c[1]))] for c in rot['rot_corners']], dtype=np.int32)
+    cv2.polylines(image_rgb, [pts], isClosed=True, color=cyan, thickness=1)
+    if abs(rot['angle_deg']) > 1.0:
+        cv2.putText(image_rgb, f"{rot['angle_deg']:+.1f}°",
+                    (top_x + 6, line_y1 + 12),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, cyan, 1)
+
+    # Nuevo setup: cinta llega al piso → floor = bottom_tape (donde toca el suelo)
     floor_y = line_y2
 
-    # Línea horizontal de piso (coincide con bottom_tape)
     floor_color = (0, 255, 255)  # RGB cyan
     half_w = max(30, (x2 - x1))
     cv2.line(image_rgb, (cx - half_w, floor_y), (cx + half_w, floor_y), floor_color, 1)
@@ -213,9 +297,12 @@ def _draw_tape_and_floor_on(image_rgb, bbox):
     return {
         'cx': cx,
         'top_tape': line_y1,
+        'top_tape_x': top_x,
         'bottom_tape': line_y2,
         'floor': floor_y,
-        'tape_px': abs(line_y2 - line_y1),
+        'tape_px': float(rot['tape_px']),  # diagonal real
+        'angle_deg': float(rot['angle_deg']),
+        'rot_corners': rot['rot_corners'],
     }
 
 try:
@@ -1576,7 +1663,7 @@ class WeightEstimator:
                         (_rcx2, _rtt2, _rfl2, _rtp2, 'R'),
                     ]:
                         if tpp > 0:
-                            sc = 112.0 / tpp
+                            sc = 110.0 / tpp
                             h_cm = (flp - ttp) * sc
                             txt = f"{h_cm:.0f}cm"
                             ymid = (ttp + flp) // 2
@@ -1644,7 +1731,7 @@ class WeightEstimator:
                         cv2.line(img_rgb, a, b, rect_color, 1)
                     for p, side in [(p1, 'L'), (p2, 'R')]:
                         if p['tape_px'] > 0:
-                            scale = 112.0 / p['tape_px']
+                            scale = 110.0 / p['tape_px']
                             h_cm = (p['floor'] - p['top_tape']) * scale
                             txt = f"{h_cm:.0f}cm"
                             ymid = (p['top_tape'] + p['floor']) // 2
@@ -1669,7 +1756,7 @@ class WeightEstimator:
                         cv2.putText(img_rgb, f'POSTE {idx_c+1} (score:{score:.2f} rojo:{red_ratio:.2f})',
                                    (x1, max(15, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
                         cv2.rectangle(img_rgb, (x1, y1), (x2, y2), (0, 200, 0), 3)
-                        label_ref = f'REF {idx_c+1}: {measured_h:.1f}px = 112cm'
+                        label_ref = f'REF {idx_c+1}: {measured_h:.1f}px = 110cm'
                         (tw_r, th_r), _ = cv2.getTextSize(label_ref, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
                         cv2.rectangle(img_rgb, (x1, max(0, y1 - th_r - 10)), (x1 + tw_r + 4, max(0, y1 - 2)), (0, 0, 0), -1)
                         cv2.putText(img_rgb, label_ref, (x1 + 2, max(th_r + 2, y1 - 4)),
@@ -1692,7 +1779,7 @@ class WeightEstimator:
             # Mostrar promedio si hay 2+ postes visibles
             if len(measured_heights) >= 2:
                 avg_h = sum(measured_heights) / len(measured_heights)
-                avg_text = f'PROMEDIO: {avg_h:.1f}px = 112cm'
+                avg_text = f'PROMEDIO: {avg_h:.1f}px = 110cm'
                 (tw_a, th_a), _ = cv2.getTextSize(avg_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
                 avg_x = img_width - tw_a - 10
                 avg_y = 25
@@ -1742,8 +1829,8 @@ class WeightEstimator:
                     # Fallback: posición horizontal (clamped)
                     p_x = (cow_cx - cx1) / (cx2 - cx1)
                     t = max(0.0, min(1.0, p_x))
-                scale_1 = 112.0 / tape_px_1
-                scale_2 = 112.0 / tape_px_2
+                scale_1 = 110.0 / tape_px_1
+                scale_2 = 110.0 / tape_px_2
                 escala_postes = (1 - t) * scale_1 + t * scale_2
                 _scale_direct_from_postes = True
                 _log(f"postes: LOCKED_REF escala={escala_postes:.5f} cm/px "

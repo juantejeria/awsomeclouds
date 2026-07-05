@@ -275,6 +275,14 @@ def guardar_ply(path, pts_cm, tris, colores, simetrico=False, escala_info=""):
         all_colors = colores
         all_tris = tris
 
+    # Recorte de cresta del LOMO (mismo criterio que recortar_cresta_ply.py).
+    # Solución integral: los modelos nuevos no nacen con cresta. No toca la panza.
+    try:
+        from crest_trim_mesh import trim_top_crest
+        all_pts = trim_top_crest(all_pts)
+    except Exception as _e:
+        print(f"[warn] recorte de cresta omitido: {_e}")
+
     nv, nf = len(all_pts), len(all_tris)
     with open(path, 'w') as f:
         f.write(f"ply\nformat ascii 1.0\n")

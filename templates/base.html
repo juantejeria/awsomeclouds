@@ -28,6 +28,7 @@
 
 </body>
 
+<script>window.VARA_CM = {{ vara_cm|default(110) }}; window.K_DEPTH = {{ k_depth|default(0.25) }};</script>
 <script src="{{ url_for('static', filename='js/engine.js') }}?v={{ range(100000, 999999) | random }}" type="text/javascript"></script>
 <script type="module" src="{{ url_for('static', filename='js/viewer3d.js') }}?v={{ range(100000, 999999) | random }}"></script>
 

@@ -9,6 +9,7 @@ from scipy.spatial import Delaunay, ConvexHull
 from pathlib import Path
 import json
 import struct
+from core.calibracion import DENSIDAD_KG_L
 
 
 def detectar_y_matchear(img1, img2):
@@ -554,8 +555,8 @@ def modelo_hibrido(frames, masks, cow_height_cm, bboxes=None, masks_full=None, o
         alto_barril_cm = barril_puntos_cm[:, 1].max() - barril_puntos_cm[:, 1].min()
 
     # Peso total y peso barril (densidad ~1.03 kg/L)
-    peso_kg = round(float(vol_litros) * 1.03, 2)
-    peso_barril_kg = round(float(vol_barril_litros) * 1.03, 2)
+    peso_kg = round(float(vol_litros) * DENSIDAD_KG_L, 2)
+    peso_barril_kg = round(float(vol_barril_litros) * DENSIDAD_KG_L, 2)
 
     # ── Step 5: Guardar PLY ──
     progress(5, "Finalizando modelo...")
@@ -841,8 +842,8 @@ def sfm_desde_frames(frames, masks, cow_height_cm, bboxes=None, masks_full=None,
     all_tris = np.vstack([tris_r, tris_l]) if len(tris_r) > 0 else np.array([]).reshape(0, 3).astype(int)
 
     # Métricas promediadas
-    peso_kg = round(float(avg_vol) * 1.03, 2)
-    peso_barril_kg = round(float(avg_vol_barril) * 1.03, 2)
+    peso_kg = round(float(avg_vol) * DENSIDAD_KG_L, 2)
+    peso_barril_kg = round(float(avg_vol_barril) * DENSIDAD_KG_L, 2)
     alto_cm = cow_height_cm  # altura real calibrada
 
     vol_std = statistics.stdev([r['vol_litros'] for r in validos]) if len(validos) > 1 else 0
@@ -1396,10 +1397,10 @@ def sfm_real_desde_frames(frames, masks, cow_height_cm, bboxes=None, masks_full=
     alto_cm_measured = sorted([x_max - x_min, y_max - y_min, z_max - z_min])[1]
     ancho_cm = min(x_max - x_min, y_max - y_min, z_max - z_min)
 
-    peso_kg = round(float(vol_litros) * 1.03, 2)
+    peso_kg = round(float(vol_litros) * DENSIDAD_KG_L, 2)
 
     # Barrel volume (using torso mask from best frame)
-    peso_barril_kg = round(float(vol_litros) * 0.7 * 1.03, 2)  # estimate: barrel ≈ 70% of total
+    peso_barril_kg = round(float(vol_litros) * 0.7 * DENSIDAD_KG_L, 2)  # estimate: barrel ≈ 70% of total
     vol_barril_litros = round(vol_litros * 0.7, 1)
 
     # Use best frame for visualization data

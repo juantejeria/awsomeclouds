@@ -39,6 +39,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.collections import PolyCollection
+from core.calibracion import K_DEPTH, DENSIDAD_KG_L
 
 
 # ═══════════════════════════════════════
@@ -817,7 +818,6 @@ def volumen_por_rebanadas(mask, escala):
       4. Área de la elipse = π * (h/2) * (h * K_DEPTH)
       5. Suma: vol = Σ área(x) * dx
     """
-    K_DEPTH = 0.25  # ratio profundidad/altura del corte
 
     h_img, w_img = mask.shape[:2]
     dx_cm = escala
@@ -1499,7 +1499,7 @@ def generar_visualizacion(nombre_vaca, peso_real, mejor, metricas, output_path):
         ax6.add_collection(PolyCollection(polys_b, facecolors=fcolors_b, edgecolors='none', alpha=0.9))
         ax6.set_xlim(pb_cm[:, 0].min()-3, pb_cm[:, 0].max()+3)
         ax6.set_ylim(pb_cm[:, 1].min()-3, pb_cm[:, 1].max()+3)
-    ax6.set_title(f'Barril 3D ({vbl:.0f}L → {vbl*1.03:.0f}kg)' if vbl is not None else 'Barril 3D (N/A)')
+    ax6.set_title(f'Barril 3D ({vbl:.0f}L → {vbl*DENSIDAD_KG_L:.0f}kg)' if vbl is not None else 'Barril 3D (N/A)')
     ax6.set_aspect('equal')
     ax6.axis('off')
 
@@ -1526,7 +1526,7 @@ Escala:            {metricas['escala']:.4f} cm/px
 BARRIL:
   Largo:           {metricas['largo_cm']:.1f} cm
   Volumen:         {f"{metricas['vol_barril_litros']:.1f} litros" if metricas['vol_barril_litros'] is not None else "N/A"}
-  Peso barril:     {f"{metricas['vol_barril_litros']*1.03:.1f} kg" if metricas['vol_barril_litros'] is not None else "N/A"}
+  Peso barril:     {f"{metricas['vol_barril_litros']*DENSIDAD_KG_L:.1f} kg" if metricas['vol_barril_litros'] is not None else "N/A"}
 
 Triangulos:        {metricas['num_triangulos']}
 Fotos procesadas:  {metricas['fotos_validas']}/{metricas['fotos_procesadas']}"""
@@ -1880,8 +1880,8 @@ def procesar_individuo(individuo_dir, fotos_dir, output_dir, cow_model, coco_mod
         if r is None:
             continue
         vb = r['vol_barril_litros']
-        vb_str = f"{vb:.1f}L ({vb*1.03:.1f}kg)" if vb is not None else "N/A"
-        print(f"Vol: {r['vol_total_litros']:.1f}L ({r['vol_total_litros']*1.03:.1f}kg) | Barril: {vb_str}")
+        vb_str = f"{vb:.1f}L ({vb*DENSIDAD_KG_L:.1f}kg)" if vb is not None else "N/A"
+        print(f"Vol: {r['vol_total_litros']:.1f}L ({r['vol_total_litros']*DENSIDAD_KG_L:.1f}kg) | Barril: {vb_str}")
         resultados.append(r)
 
     if descartados_incompletos > 0:
@@ -1904,7 +1904,7 @@ def procesar_individuo(individuo_dir, fotos_dir, output_dir, cow_model, coco_mod
     # ── Fase 2: Usar PROMEDIO de todos los frames válidos ──
     vols_barril_validos = [r['vol_barril_litros'] for r in validos if r['vol_barril_litros'] is not None]
     vol_barril_promedio = statistics.mean(vols_barril_validos) if vols_barril_validos else None
-    peso_barril_promedio = vol_barril_promedio * 1.03 if vol_barril_promedio is not None else None
+    peso_barril_promedio = vol_barril_promedio * DENSIDAD_KG_L if vol_barril_promedio is not None else None
     vol_total_promedio = statistics.mean([r['vol_total_litros'] for r in validos])
 
     # Mejor foto para visualización: preferir las que tienen barril detectado;
@@ -1995,10 +1995,10 @@ def procesar_individuo(individuo_dir, fotos_dir, output_dir, cow_model, coco_mod
         'metodo': 'promedio_frames',
         'escala_cm_px': round(mejor['escala'], 6),
         'vol_total_litros': round(vol_total_promedio, 1),
-        'peso_vol_kg': round(vol_total_promedio * 1.03, 1),
+        'peso_vol_kg': round(vol_total_promedio * DENSIDAD_KG_L, 1),
         'vol_total_std': round(vol_std, 1),
         'vol_barril_litros': round(vol_barril_promedio, 1) if vol_barril_promedio is not None else None,
-        'peso_barril_kg': round(vol_barril_promedio * 1.03, 1) if vol_barril_promedio is not None else None,
+        'peso_barril_kg': round(vol_barril_promedio * DENSIDAD_KG_L, 1) if vol_barril_promedio is not None else None,
         'vol_barril_std': round(statistics.stdev(vols_barril_validos) if len(vols_barril_validos) > 1 else 0, 1) if vols_barril_validos else None,
         'fotos_procesadas': len(resultados),
         'fotos_validas': len(validos),
@@ -2008,9 +2008,9 @@ def procesar_individuo(individuo_dir, fotos_dir, output_dir, cow_model, coco_mod
             {
                 'foto': r['nombre'],
                 'vol_total_litros': r['vol_total_litros'],
-                'peso_vol_kg': round(r['vol_total_litros'] * 1.03, 1),
+                'peso_vol_kg': round(r['vol_total_litros'] * DENSIDAD_KG_L, 1),
                 'vol_barril_litros': r['vol_barril_litros'],
-                'peso_barril_kg': round(r['vol_barril_litros'] * 1.03, 1) if r['vol_barril_litros'] is not None else None,
+                'peso_barril_kg': round(r['vol_barril_litros'] * DENSIDAD_KG_L, 1) if r['vol_barril_litros'] is not None else None,
                 'descartada': r in descartados,
             }
             for r in resultados
@@ -2019,11 +2019,11 @@ def procesar_individuo(individuo_dir, fotos_dir, output_dir, cow_model, coco_mod
     with open(ind_output / f"{nombre}_resumen.json", 'w') as f:
         json.dump(resumen, f, indent=2, ensure_ascii=False)
 
-    peso_vol = metricas['vol_total_litros'] * 1.03
+    peso_vol = metricas['vol_total_litros'] * DENSIDAD_KG_L
     print(f"\n  RESULTADO {nombre.upper()} (PROMEDIO {len(validos)} frames completos):")
     print(f"    Vol total:  {metricas['vol_total_litros']:.1f} L → peso: {peso_vol:.1f} kg (real: {peso_real} kg)")
     if metricas['vol_barril_litros'] is not None:
-        peso_barril = metricas['vol_barril_litros'] * 1.03
+        peso_barril = metricas['vol_barril_litros'] * DENSIDAD_KG_L
         error_50 = (peso_barril - peso_real * 0.5) / peso_real * 100
         print(f"    Vol barril: {metricas['vol_barril_litros']:.1f} L → peso: {peso_barril:.1f} kg (target 50%: {peso_real*0.5:.0f} kg, error: {error_50:+.1f}%)")
     else:
@@ -2305,10 +2305,10 @@ def main():
     print(f"\n  {'Individuo':<20} {'Peso Real':>10} {'Vol(L)':>8} {'Peso Vol':>10} {'Barril(L)':>10} {'Peso Barr':>10}")
     print(f"  {'-'*20} {'-'*10} {'-'*8} {'-'*10} {'-'*10} {'-'*10}")
     for r in resumen_global:
-        peso_vol = r['vol_total_litros'] * 1.03
+        peso_vol = r['vol_total_litros'] * DENSIDAD_KG_L
         vbl = r['vol_barril_litros']
         if vbl is not None:
-            peso_barril = vbl * 1.03
+            peso_barril = vbl * DENSIDAD_KG_L
             barril_str = f"{vbl:>10.1f} {peso_barril:>8.1f} kg"
         else:
             barril_str = f"{'N/A':>10} {'N/A':>10}"

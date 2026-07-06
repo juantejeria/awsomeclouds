@@ -19,6 +19,7 @@ import os
 import time
 
 import base64
+from core.calibracion import VARA_CM
 
 try:
     from core.depth_estimation import DepthEstimator
@@ -1663,7 +1664,7 @@ class WeightEstimator:
                         (_rcx2, _rtt2, _rfl2, _rtp2, 'R'),
                     ]:
                         if tpp > 0:
-                            sc = 110.0 / tpp
+                            sc = VARA_CM / tpp
                             h_cm = (flp - ttp) * sc
                             txt = f"{h_cm:.0f}cm"
                             ymid = (ttp + flp) // 2
@@ -1731,7 +1732,7 @@ class WeightEstimator:
                         cv2.line(img_rgb, a, b, rect_color, 1)
                     for p, side in [(p1, 'L'), (p2, 'R')]:
                         if p['tape_px'] > 0:
-                            scale = 110.0 / p['tape_px']
+                            scale = VARA_CM / p['tape_px']
                             h_cm = (p['floor'] - p['top_tape']) * scale
                             txt = f"{h_cm:.0f}cm"
                             ymid = (p['top_tape'] + p['floor']) // 2
@@ -1756,7 +1757,7 @@ class WeightEstimator:
                         cv2.putText(img_rgb, f'POSTE {idx_c+1} (score:{score:.2f} rojo:{red_ratio:.2f})',
                                    (x1, max(15, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
                         cv2.rectangle(img_rgb, (x1, y1), (x2, y2), (0, 200, 0), 3)
-                        label_ref = f'REF {idx_c+1}: {measured_h:.1f}px = 110cm'
+                        label_ref = f'REF {idx_c+1}: {measured_h:.1f}px = {VARA_CM:.0f}cm'
                         (tw_r, th_r), _ = cv2.getTextSize(label_ref, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
                         cv2.rectangle(img_rgb, (x1, max(0, y1 - th_r - 10)), (x1 + tw_r + 4, max(0, y1 - 2)), (0, 0, 0), -1)
                         cv2.putText(img_rgb, label_ref, (x1 + 2, max(th_r + 2, y1 - 4)),
@@ -1779,7 +1780,7 @@ class WeightEstimator:
             # Mostrar promedio si hay 2+ postes visibles
             if len(measured_heights) >= 2:
                 avg_h = sum(measured_heights) / len(measured_heights)
-                avg_text = f'PROMEDIO: {avg_h:.1f}px = 110cm'
+                avg_text = f'PROMEDIO: {avg_h:.1f}px = {VARA_CM:.0f}cm'
                 (tw_a, th_a), _ = cv2.getTextSize(avg_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
                 avg_x = img_width - tw_a - 10
                 avg_y = 25
@@ -1829,8 +1830,8 @@ class WeightEstimator:
                     # Fallback: posición horizontal (clamped)
                     p_x = (cow_cx - cx1) / (cx2 - cx1)
                     t = max(0.0, min(1.0, p_x))
-                scale_1 = 110.0 / tape_px_1
-                scale_2 = 110.0 / tape_px_2
+                scale_1 = VARA_CM / tape_px_1
+                scale_2 = VARA_CM / tape_px_2
                 escala_postes = (1 - t) * scale_1 + t * scale_2
                 _scale_direct_from_postes = True
                 _log(f"postes: LOCKED_REF escala={escala_postes:.5f} cm/px "

@@ -3,12 +3,14 @@ Una fila por individuo; columnas de volumen de corte 40%..70% (cruz↔anca, sin 
 Uso: python exportar_corte_xlsx.py
 """
 import csv
+from pathlib import Path
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-CSV = 'output_cruz_modelos/tabla_corte_barrido.csv'
-OUT = 'tabla_corte_barrido_sincresta.xlsx'
+_ROOT = Path(__file__).resolve().parents[1]
+CSV = _ROOT / 'output_cruz_modelos' / 'tabla_corte_barrido.csv'
+OUT = _ROOT / 'tabla_corte_barrido_sincresta.xlsx'
 
 rows = list(csv.DictReader(open(CSV)))
 cols = list(rows[0].keys())  # respeta el orden del CSV

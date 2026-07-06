@@ -24,7 +24,7 @@ class DepthEstimator:
     puede calcular la profundidad del animal y ajustar la escala correctamente.
     """
     
-    def __init__(self, sticker_model_path="models_yolo/sticker.pt",
+    def __init__(self, sticker_model_path="models/sticker.pt",
                  poste1_height_cm=50, poste2_height_cm=50,
                  distancia_postes_cm=200, focal_length_px=None,
                  conf_threshold=0.25, iou_threshold=0.45,

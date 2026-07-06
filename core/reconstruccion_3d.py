@@ -1516,7 +1516,7 @@ def sfm_real_desde_frames(frames, masks, cow_height_cm, bboxes=None, masks_full=
 
 
 def main():
-    project_dir = Path(__file__).parent
+    project_dir = Path(__file__).resolve().parents[1]
     fotos_dir = project_dir / "checkpoints" / "dataset" / "modelo" / "vaca1"
     output_dir = project_dir / "reconstruccion_3d_vaca1"
     output_dir.mkdir(exist_ok=True)

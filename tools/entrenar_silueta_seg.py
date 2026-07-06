@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 from sklearn.model_selection import train_test_split
 
-PROJECT = Path(__file__).parent
+PROJECT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT / 'output_modelos3d_grandes' / '_silueta_training'
 INDEX_FILE = DATA_DIR / 'frames_index.json'
 DATASET_DIR = PROJECT / 'dataset_silueta_seg'
@@ -196,7 +196,7 @@ def entrenar(yaml_path):
 
     # Copiar mejor modelo
     best = PROJECT / 'runs_silueta' / 'silueta_seg' / 'weights' / 'best.pt'
-    dst = PROJECT / 'silueta_seg.pt'
+    dst = PROJECT / 'models' / 'silueta_seg.pt'
     if best.exists():
         shutil.copy2(str(best), str(dst))
         print(f"\n{'='*50}")

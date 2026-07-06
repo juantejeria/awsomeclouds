@@ -1,12 +1,12 @@
 """
 Agrega frames de checkpoints/desfile26marz y checkpoints/26marz
-al dataset de barril training (_barril_training).
+al dataset de silueta completa (_silueta_training).
 
 Para cada screenshot:
 1. Detecta la vaca (YOLO cow.pt / COCO fallback)
 2. Recorta al bbox
 3. Genera mascara GrabCut como base
-4. Guarda img + mask en _barril_training
+4. Guarda img + mask en _silueta_training
 5. Agrega al indice
 """
 import cv2
@@ -14,15 +14,15 @@ import numpy as np
 import json
 import sys
 import os
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from pathlib import Path
 from ultralytics import YOLO
-from generar_modelos3d_grandes import detectar_vaca, segmentar
+from core.generar_modelos3d_grandes import detectar_vaca, segmentar
 
-PROJECT = Path(__file__).parent
-BARRIL_DIR = PROJECT / 'output_modelos3d_grandes' / '_barril_training'
-INDEX_FILE = BARRIL_DIR / 'frames_index.json'
+PROJECT = Path(__file__).resolve().parents[1]
+SILUETA_DIR = PROJECT / 'output_modelos3d_grandes' / '_silueta_training'
+INDEX_FILE = SILUETA_DIR / 'frames_index.json'
 
 SOURCES = [
     PROJECT / 'checkpoints' / 'desfile26marz',
@@ -51,7 +51,7 @@ def make_id(individuo, foto_name, idx):
 
 def main():
     print("Cargando modelos YOLO...")
-    cow_model = YOLO(str(PROJECT / 'models_yolo' / 'cow.pt'))
+    cow_model = YOLO(str(PROJECT / 'models' / 'cow.pt'))
     coco_model = YOLO(str(PROJECT / 'yolov8n.pt'))
 
     frames = load_index()
@@ -98,6 +98,8 @@ def main():
                     continue
 
                 x1, y1, x2, y2 = bbox
+                crop_w = int(x2 - x1)
+                crop_h = int(y2 - y1)
 
                 # Generar mascara GrabCut
                 mask_full, contorno = segmentar(img, bbox, nombre_foto=foto_path.name)
@@ -106,7 +108,7 @@ def main():
                     failed += 1
                     continue
 
-                # Recortar al bbox con padding generoso
+                # Recortar al bbox con padding generoso para no cortar el animal
                 pad = 50
                 ry1 = max(0, y1 - pad)
                 ry2 = min(img.shape[0], y2 + pad)
@@ -116,7 +118,7 @@ def main():
                 img_crop = img[ry1:ry2, rx1:rx2]
                 mask_crop = mask_full[ry1:ry2, rx1:rx2]
 
-                # Filtro de resolucion minima
+                # Filtro de resolucion minima: si el crop es muy chico, no sirve
                 if img_crop.shape[1] < 200 or img_crop.shape[0] < 150:
                     print(f"    {foto_path.name}: crop muy chico ({img_crop.shape[1]}x{img_crop.shape[0]}), skip")
                     failed += 1
@@ -126,8 +128,8 @@ def main():
                 img_filename = f"{fid}_img.png"
                 mask_filename = f"{fid}_mask.png"
 
-                cv2.imwrite(str(BARRIL_DIR / img_filename), img_crop)
-                cv2.imwrite(str(BARRIL_DIR / mask_filename), mask_crop)
+                cv2.imwrite(str(SILUETA_DIR / img_filename), img_crop)
+                cv2.imwrite(str(SILUETA_DIR / mask_filename), mask_crop)
 
                 frames.append({
                     'id': fid,
@@ -137,10 +139,11 @@ def main():
                     'bbox': [int(rx1), int(ry1), int(rx2), int(ry2)],
                     'crop_w': int(rx2 - rx1),
                     'crop_h': int(ry2 - ry1),
-                    'img': img_filename,
+                    'img': img_filename,  # ahora PNG
                     'mask': mask_filename,
                     'status': 'pending',
                     'cuts': [],
+                    'brush_rle': [],
                     'source': source_name,
                     'foto_original': foto_path.name,
                 })

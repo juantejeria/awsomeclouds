@@ -2,13 +2,13 @@ from flask import Flask, redirect, url_for, request, render_template, jsonify, s
 from werkzeug.utils import secure_filename
 import os
 import tensorflow as tf
-from testing import ModelLoad, ImageScore
-from weight_estimation import WeightEstimator
-from depth_estimation import DepthEstimator
-from breed_coefficients import BREED_OPTIONS, CATEGORY_OPTIONS, AGE_OPTIONS, get_weight_range, get_estimated_height, HEIGHT_BY_CATEGORY_AGE
-from video_processor import VideoProcessor
-from generar_modelos3d_batch import procesar_frame, filtrar_outliers, guardar_ply, detectar_vaca, segmentar, recortar_torso
-from reconstruccion_3d import sfm_desde_frames, sfm_real_desde_frames, modelo_hibrido, guardar_ply_con_malla, generar_imagen_resumen
+from core.testing import ModelLoad, ImageScore
+from core.weight_estimation import WeightEstimator
+from core.depth_estimation import DepthEstimator
+from core.breed_coefficients import BREED_OPTIONS, CATEGORY_OPTIONS, AGE_OPTIONS, get_weight_range, get_estimated_height, HEIGHT_BY_CATEGORY_AGE
+from core.video_processor import VideoProcessor
+from core.generar_modelos3d_batch import procesar_frame, filtrar_outliers, guardar_ply, detectar_vaca, segmentar, recortar_torso
+from core.reconstruccion_3d import sfm_desde_frames, sfm_real_desde_frames, modelo_hibrido, guardar_ply_con_malla, generar_imagen_resumen
 import operator
 import configparser
 import tempfile
@@ -105,8 +105,8 @@ except Exception as e:
 try:
     from ultralytics import YOLO as _YOLO_seg
     _app_dir = os.path.dirname(os.path.abspath(__file__))
-    _barril_path = os.path.join(_app_dir, 'barril_seg.pt')
-    _silueta_path = os.path.join(_app_dir, 'silueta_seg.pt')
+    _barril_path = os.path.join(_app_dir, 'models', 'barril_seg.pt')
+    _silueta_path = os.path.join(_app_dir, 'models', 'silueta_seg.pt')
     barril_seg_model = _YOLO_seg(_barril_path) if os.path.exists(_barril_path) else None
     silueta_seg_model = _YOLO_seg(_silueta_path) if os.path.exists(_silueta_path) else None
     if barril_seg_model:
@@ -627,7 +627,7 @@ def detect_reference_points():
                     return bbox_y2, 0.0
 
                 def _draw_poste_with_yellow_line(bbox, label):
-                    from weight_estimation import _rotated_tape_from_roi
+                    from core.weight_estimation import _rotated_tape_from_roi
                     x1, y1, x2, y2 = map(int, bbox)
                     cv2.rectangle(annotated, (x1, y1), (x2, y2), highlight_color, 2)
 
@@ -895,7 +895,7 @@ def calibrate_frame():
         img_orig, resized_image, img_rgb, scale_factor, pad_x, pad_y, w_orig, h_orig = \
             weight_estimator._load_and_resize(temp_path, lambda m: None)
 
-        from weight_estimation import _draw_tape_and_floor_on
+        from core.weight_estimation import _draw_tape_and_floor_on
 
         annotated_rgb = img_rgb.copy()
         infos = []
@@ -1082,7 +1082,7 @@ def generate_3d_consensus():
             if _proj not in _sys.path:
                 _sys.path.insert(0, _proj)
                 sys_path_added = True
-            from generar_modelos3d_grandes import volumen_ply_cerrado
+            from core.generar_modelos3d_grandes import volumen_ply_cerrado
         finally:
             if sys_path_added:
                 _sys.path.remove(_proj)
@@ -1378,7 +1378,7 @@ def generate_3d_from_frame():
             if _proj not in _sys.path:
                 _sys.path.insert(0, _proj)
                 sys_path_added = True
-            from generar_modelos3d_grandes import guardar_ply, volumen_malla_cerrada
+            from core.generar_modelos3d_grandes import guardar_ply, volumen_malla_cerrada
         finally:
             if sys_path_added:
                 _sys.path.remove(_proj)
@@ -2932,7 +2932,7 @@ def video_modelo3d():
                 guardar_ply_con_malla(ply_3d_path, points_3d, triangles, colors)
             else:
                 # Fallback: point cloud only (import from reconstruccion_3d)
-                from reconstruccion_3d import guardar_ply as guardar_ply_nube
+                from core.reconstruccion_3d import guardar_ply as guardar_ply_nube
                 guardar_ply_nube(ply_3d_path, points_3d, colors)
 
             # Helper to ensure all values are JSON-safe (no numpy types)
@@ -3122,7 +3122,7 @@ def guardar_girth(vaca):
             'perim_cm': data.get('perim_cm'),
             'ts': _datetime.datetime.now().isoformat(timespec='seconds'),
         }
-        with open(os.path.join(base, 'girth_labels.jsonl'), 'a') as lf:
+        with open(os.path.join(base, 'data', 'girth_labels.jsonl'), 'a') as lf:
             lf.write(json.dumps(label, ensure_ascii=False) + '\n')
 
         return jsonify({'success': True, 'girth_frac': round(frac, 4)})
@@ -3180,7 +3180,7 @@ def guardar_verija(vaca):
             'perim_cm': data.get('perim_cm'),
             'ts': _datetime.datetime.now().isoformat(timespec='seconds'),
         }
-        with open(os.path.join(base, 'verija_labels.jsonl'), 'a') as lf:
+        with open(os.path.join(base, 'data', 'verija_labels.jsonl'), 'a') as lf:
             lf.write(json.dumps(label, ensure_ascii=False) + '\n')
 
         return jsonify({'success': True, 'verija_frac': round(frac, 4)})
@@ -3234,7 +3234,7 @@ def guardar_cruz(vaca):
             'perim_cm': data.get('perim_cm'),
             'ts': _datetime.datetime.now().isoformat(timespec='seconds'),
         }
-        with open(os.path.join(base, 'cruz_frac_labels.jsonl'), 'a') as lf:
+        with open(os.path.join(base, 'data', 'cruz_frac_labels.jsonl'), 'a') as lf:
             lf.write(json.dumps(label, ensure_ascii=False) + '\n')
 
         return jsonify({'success': True, 'cruz_frac': round(frac, 4)})
@@ -3288,7 +3288,7 @@ def guardar_anca(vaca):
             'perim_cm': data.get('perim_cm'),
             'ts': _datetime.datetime.now().isoformat(timespec='seconds'),
         }
-        with open(os.path.join(base, 'anca_frac_labels.jsonl'), 'a') as lf:
+        with open(os.path.join(base, 'data', 'anca_frac_labels.jsonl'), 'a') as lf:
             lf.write(json.dumps(label, ensure_ascii=False) + '\n')
 
         return jsonify({'success': True, 'anca_frac': round(frac, 4)})
@@ -3339,7 +3339,7 @@ def guardar_corte(vaca):
             'vol_corte_litros': data.get('vol_corte_litros'),
             'ts': _datetime.datetime.now().isoformat(timespec='seconds'),
         }
-        with open(os.path.join(base, 'corte_labels.jsonl'), 'a') as lf:
+        with open(os.path.join(base, 'data', 'corte_labels.jsonl'), 'a') as lf:
             lf.write(json.dumps(label, ensure_ascii=False) + '\n')
 
         return jsonify({'success': True, 'corte_frac': round(frac, 4)})

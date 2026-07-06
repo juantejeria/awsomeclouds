@@ -13,7 +13,9 @@ venv/
 env/
 
 # ── YOLO models (shared separately, not versioned) ──
-models_yolo/*.pt
+models/cow.pt
+models/eye.pt
+models/sticker.pt
 yolov8*.pt
 
 # ── Dataset & media ──

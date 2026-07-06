@@ -11,12 +11,12 @@ import cv2
 import numpy as np
 import sys
 import os
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from flask import Flask, render_template_string, jsonify, request
 from ultralytics import YOLO
 from pathlib import Path
-from generar_modelos3d_grandes import (
+from core.generar_modelos3d_grandes import (
     detectar_vaca, segmentar_yolo_seg, volumen_por_rebanadas, parsear_nombre
 )
 import json
@@ -25,7 +25,7 @@ import base64
 app = Flask(__name__)
 
 # Globals
-PROJECT = Path(__file__).parent
+PROJECT = Path(__file__).resolve().parents[1]
 DATASET = PROJECT / 'checkpoints' / 'Dataset Modelo 3d "grandes" '
 OUTPUT = PROJECT / 'output_modelos3d_grandes' / '_editor_barril'
 OUTPUT.mkdir(parents=True, exist_ok=True)
@@ -40,9 +40,9 @@ def cargar_modelos():
     global cow_model, seg_model, alturas
     if cow_model is None:
         print("Cargando modelos YOLO...")
-        cow_model = YOLO(str(PROJECT / "models_yolo" / "cow.pt"))
+        cow_model = YOLO(str(PROJECT / "models" / "cow.pt"))
         seg_model = YOLO(str(PROJECT / "yolov8n-seg.pt"))
-        with open(PROJECT / "alturas_individuos.json") as f:
+        with open(PROJECT / "data" / "alturas_individuos.json") as f:
             alturas = json.load(f)['alturas_cm']
         print("Modelos cargados.")
 

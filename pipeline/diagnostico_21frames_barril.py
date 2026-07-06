@@ -74,7 +74,7 @@ def main():
     ap.add_argument("folder")
     ap.add_argument("--out", default=None)
     ap.add_argument("--cols", type=int, default=7)
-    ap.add_argument("--barril-model", default="barril_seg.pt",
+    ap.add_argument("--barril-model", default="models/barril_seg.pt",
                     help=".pt del modelo de segmentación de barril (relativo al proyecto o absoluto)")
     args = ap.parse_args()
 
@@ -83,7 +83,7 @@ def main():
         print(f"[error] no existe {folder}"); return
     out_path = Path(args.out) if args.out else (folder / "diagnostico_barril_grid.png")
 
-    proj = Path(__file__).parent
+    proj = Path(__file__).resolve().parents[1]
     _barril_arg = Path(args.barril_model)
     barril_path = _barril_arg if _barril_arg.is_absolute() else (proj / _barril_arg)
     if not barril_path.exists():

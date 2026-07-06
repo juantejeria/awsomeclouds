@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from pathlib import Path
 from ultralytics import YOLO
 
-PROJECT = Path(__file__).parent
+PROJECT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT / 'output_modelos3d_grandes' / '_barril_training'
 INDEX_FILE = DATA_DIR / 'frames_index.json'
 
@@ -35,7 +35,7 @@ def main():
     print(f"{len(pending)} frames sin predicción. Generando...")
 
     # Cargar modelo de silueta
-    silueta_path = PROJECT / 'silueta_seg.pt'
+    silueta_path = PROJECT / 'models' / 'silueta_seg.pt'
     if not silueta_path.exists():
         print("ERROR: silueta_seg.pt no encontrado")
         sys.exit(1)

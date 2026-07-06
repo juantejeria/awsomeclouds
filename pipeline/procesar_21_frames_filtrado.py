@@ -27,7 +27,7 @@ _ap.add_argument('--min-cov-x', type=float, default=55.0,
                  help='Cobertura X mínima en %% para incluir el frame en el consenso.')
 _ap.add_argument('--out-tag', default='filtrado',
                  help='Subdirectorio base: output_modelos3d_live_<tag>/')
-_ap.add_argument('--barril-model', default='barril_seg.pt',
+_ap.add_argument('--barril-model', default='models/barril_seg.pt',
                  help='.pt del modelo de segmentación de barril (relativo al proyecto o ruta absoluta)')
 _args = _ap.parse_args()
 folder = Path(_args.folder)
@@ -39,7 +39,7 @@ out_tag = _args.out_tag
 if not folder.is_dir():
     print(f"[error] no existe: {folder}"); sys.exit(1)
 
-proj_dir = Path(__file__).parent
+proj_dir = Path(__file__).resolve().parents[1]
 _barril_arg = Path(_args.barril_model)
 barril_path = _barril_arg if _barril_arg.is_absolute() else (proj_dir / _barril_arg)
 if not barril_path.exists():
@@ -250,7 +250,7 @@ print(f"[malla] {len(all_px)} verts, {len(tris_arr)} triángulos")
 
 # 5. Generar PLYs
 sys.path.insert(0, str(proj_dir))
-from generar_modelos3d_grandes import guardar_ply, volumen_malla_cerrada
+from core.generar_modelos3d_grandes import guardar_ply, volumen_malla_cerrada
 
 out_dir = proj_dir / f'output_modelos3d_live_{out_tag}' / cow_name
 out_dir.mkdir(parents=True, exist_ok=True)

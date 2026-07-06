@@ -7,7 +7,7 @@ import json
 import shutil
 from pathlib import Path
 
-PROJECT = Path(__file__).parent
+PROJECT = Path(__file__).resolve().parents[1]
 BARRIL_DIR = PROJECT / 'output_modelos3d_grandes' / '_barril_training'
 SILUETA_DIR = PROJECT / 'output_modelos3d_grandes' / '_silueta_training'
 BARRIL_INDEX = BARRIL_DIR / 'frames_index.json'

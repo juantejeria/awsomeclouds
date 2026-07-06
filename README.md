@@ -73,7 +73,7 @@ confidence_threshold=0.5   # Umbral para considerar un animal "conocido"
 
 ### Modelos YOLO
 
-Deben existir en `models_yolo/`:
+Deben existir en `models/`:
 
 | Archivo       | Función                              |
 |---------------|--------------------------------------|
@@ -109,48 +109,49 @@ El servidor arranca en **http://localhost:5001**.
 
 ```
 cattle-recognition/
+├── app.py                      # Servidor Flask (UI + API) — entry point
+├── run_app.sh  start_ngrok.sh  # Arranque
+├── config.ini                  # Configuración
 │
-│  ── App web (Flask) ──
-├── app.py                      # Servidor Flask: endpoints de la API
-├── weight_estimation.py        # Estimación de peso/altura, postes, piso
-├── depth_estimation.py         # Detección de postes rojos y escala cm/px
-├── video_processor.py          # Procesamiento de video con tracking IoU
-├── testing.py                  # Inferencia CNN facial (identificación)
-├── breed_coefficients.py       # Multiplicadores por raza/categoría/edad
+├── core/                       # Módulos importables (lógica compartida)
+│   ├── weight_estimation.py    #   Peso/altura, postes, piso, escala
+│   ├── depth_estimation.py     #   Detección de postes rojos (YOLO + HSV)
+│   ├── video_processor.py      #   Procesamiento de video con tracking
+│   ├── testing.py              #   Inferencia CNN facial (identificación)
+│   ├── breed_coefficients.py   #   Multiplicadores raza/categoría/edad
+│   ├── generar_modelos3d_grandes.py  # Volumen elíptico, PLY, cresta
+│   ├── generar_modelos3d_batch.py    # Versión batch usada por app.py
+│   ├── reconstruccion_3d.py    #   SfM / mallas
+│   ├── crest_trim_mesh.py      #   Recorte de cresta del lomo
+│   └── tabla_volumen_corte.py  #   Cortes de malla (secciones, clipping)
+│
+├── pipeline/                   # CLI del flujo v8 (21 frames → PLY → tablas)
+│   ├── procesar_21_frames_filtrado.py  # 21 frames → modelo 3D + resumen.json
+│   ├── gen_v8_todo.py                  # Corre todos los datasets
+│   ├── post_v8.py                      # Post-proceso (barril_dir, anotaciones)
+│   ├── diagnostico_21frames_barril.py  # Grid de diagnóstico por individuo
+│   ├── detectar_cruz_modelos.py        # Cruz por individuo (cruz_pose.pt)
+│   ├── tabla_corte_barrido.py          # Barrido de cortes 40–70% → CSV
+│   └── exportar_corte_xlsx.py          # CSV → tabla_corte_barrido_sincresta.xlsx
+│
+├── tools/                      # Anotación y entrenamiento YOLO
+│   ├── editor_barril.py / editor_barril_training.py / editor_silueta_training.py
+│   ├── entrenar_barril_seg.py / entrenar_silueta_seg.py / entrenar_cruz_pose.py
+│   └── preparar_silueta_training.py / generar_pred_barril.py / agregar_frames_*.py
+│
+├── models/                     # Pesos de modelos
+│   ├── barril_seg.pt / barril_seg_v8.pt / silueta_seg.pt / cruz_pose.pt  (versionados)
+│   └── cow.pt / eye.pt / sticker.pt    (no versionados, compartidos aparte)
+│
+├── data/                       # Datos del proyecto
+│   ├── alturas_individuos.json #   Alturas reales/calculadas por individuo
+│   └── *_labels.jsonl          #   Anotaciones (corte, cruz_frac, girth, verija)
+│
 ├── keras_vggface/              # Fork local de keras-vggface (TF2)
 ├── templates/  static/         # Frontend (index.html, engine.js, viewer3d.js)
-├── config.ini  run_app.sh      # Configuración y arranque
-│
-│  ── Pipeline 3D v8 (21 frames → PLY → volumen → tablas) ──
-├── procesar_21_frames_filtrado.py  # 21 frames → modelo 3D + resumen.json
-├── generar_modelos3d_grandes.py    # Funciones compartidas (volumen, PLY, cresta)
-├── generar_modelos3d_batch.py      # Versión batch usada por app.py
-├── reconstruccion_3d.py            # SfM / mallas
-├── crest_trim_mesh.py              # Recorte de cresta del lomo
-├── gen_v8_todo.py                  # Corre todos los datasets con v8
-├── post_v8.py                      # Post-proceso (barril_dir, anotaciones)
-├── diagnostico_21frames_barril.py  # Diagnóstico visual por individuo
-├── tabla_volumen_corte.py          # Cortes de malla (secciones, clipping)
-├── tabla_corte_barrido.py          # Barrido de cortes 40–70% → CSV
-├── exportar_corte_xlsx.py          # CSV → tabla_corte_barrido_sincresta.xlsx
-├── detectar_cruz_modelos.py        # Cruz por individuo con cruz_pose.pt
-│
-│  ── Entrenamiento / anotación de modelos YOLO ──
-├── editor_barril.py / editor_barril_training.py / editor_silueta_training.py
-├── entrenar_barril_seg.py / entrenar_silueta_seg.py / entrenar_cruz_pose.py
-├── preparar_silueta_training.py / generar_pred_barril.py
-├── agregar_frames_barril.py / agregar_frames_silueta.py
-│
-│  ── Modelos y datos ──
-├── barril_seg.pt  barril_seg_v8.pt  silueta_seg.pt  cruz_pose.pt
-├── alturas_individuos.json     # Alturas reales/calculadas por individuo
-├── *_labels.jsonl              # Anotaciones (corte, cruz_frac, girth, verija)
 ├── checkpoints/                # Modelos faciales por granja + sets de 21 frames
-├── models_yolo/                # cow.pt / eye.pt / sticker.pt (no versionados)
-│
-├── docs/                       # Documentación técnica (flujo de volúmenes,
-│                               #   calibración, escala, modelos 3D, resúmenes)
-└── archive/                    # Código y resultados NO activos (ver archive/README.md)
+├── docs/                       # Documentación técnica
+└── archive/                    # Código histórico no activo (ver archive/README.md)
 ```
 
 ## Flujo de Datos
@@ -290,18 +291,18 @@ python archive/legacy_face/training.py --granja "Mi Granja" --model resnet50 --e
 editores web y el entrenamiento con los scripts `entrenar_*`:
 
 ```bash
-python editor_barril_training.py      # anotar máscaras de barril (puerto 5055)
-python editor_silueta_training.py     # anotar siluetas
-python entrenar_barril_seg.py --out-name barril_seg_v9.pt --run-name barril_seg_v9
-python entrenar_silueta_seg.py
-python entrenar_cruz_pose.py
+python tools/editor_barril_training.py      # anotar máscaras de barril (puerto 5055)
+python tools/editor_silueta_training.py     # anotar siluetas
+python tools/entrenar_barril_seg.py --out-name barril_seg_v9.pt --run-name barril_seg_v9
+python tools/entrenar_silueta_seg.py
+python tools/entrenar_cruz_pose.py
 ```
 
 ## Troubleshooting
 
 ### El peso no se calcula
 
-1. **Verificar que los 3 modelos YOLO existen** en `models_yolo/` (`cow.pt`, `eye.pt`, `sticker.pt`)
+1. **Verificar que los 3 modelos YOLO existen** en `models/` (`cow.pt`, `eye.pt`, `sticker.pt`)
 2. **Activar debug** en la UI al procesar video y revisar la consola del servidor
 3. **Ejecutar `archive/analysis/diagnose_weight.py`** para analizar los logs
 4. Causas comunes:

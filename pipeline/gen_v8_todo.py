@@ -8,11 +8,11 @@ Alturas calc: 14/20mayo y 6mayo desde sus resúmenes; 12 junio desde dict.
 import json, subprocess, sys
 from pathlib import Path
 
-PROJ = Path(__file__).parent
+PROJ = Path(__file__).resolve().parents[1]
 PY = sys.executable
-GEN = PROJ / 'procesar_21_frames_filtrado.py'
-DIAG = PROJ / 'diagnostico_21frames_barril.py'
-MODEL = 'barril_seg_v8.pt'
+GEN = PROJ / 'pipeline' / 'procesar_21_frames_filtrado.py'
+DIAG = PROJ / 'pipeline' / 'diagnostico_21frames_barril.py'
+MODEL = 'models/barril_seg_v8.pt'
 
 JUNIO = {'000_306':102.8,'000_391':111.7,'000_392':109.3,'000_392A':120.7,
  '000_392B':111.1,'000_392C':110.9,'000_395':118.5,'000_435':122.7,

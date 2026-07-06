@@ -24,7 +24,10 @@ import numpy as np
 import trimesh
 
 # Reusamos las funciones de slicing/volumen del script existente (idénticas al visor).
-from tabla_volumen_corte import (
+import sys as _sys
+from pathlib import Path as _P
+_sys.path.insert(0, str(_P(__file__).resolve().parents[1]))
+from core.tabla_volumen_corte import (
     slice_section, section_info, clipped_volume_liters, V8, PROJ, NSTEPS,
 )
 

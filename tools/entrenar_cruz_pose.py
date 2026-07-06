@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 from sklearn.model_selection import train_test_split
 
-PROJECT = Path(__file__).parent
+PROJECT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT / 'output_modelos3d_grandes' / '_barril_training'
 INDEX_FILE = DATA_DIR / 'frames_index.json'
 DATASET_DIR = PROJECT / 'dataset_cruz_pose'
@@ -203,7 +203,7 @@ def entrenar(yaml_path, out_name='cruz_pose.pt', run_name='cruz_pose'):
     )
 
     best = PROJECT / 'runs_cruz' / run_name / 'weights' / 'best.pt'
-    dst = PROJECT / out_name
+    dst = PROJECT / 'models' / out_name
     if best.exists():
         shutil.copy2(str(best), str(dst))
         print(f"\n{'='*50}")

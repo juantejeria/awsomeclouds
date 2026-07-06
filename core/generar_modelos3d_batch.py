@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from ultralytics import YOLO
 from scipy.spatial import Delaunay, ConvexHull
 from pathlib import Path
-from breed_coefficients import get_estimated_height
+from core.breed_coefficients import get_estimated_height
 import json
 import statistics
 import matplotlib
@@ -278,7 +278,7 @@ def guardar_ply(path, pts_cm, tris, colores, simetrico=False, escala_info=""):
     # Recorte de cresta del LOMO (mismo criterio que recortar_cresta_ply.py).
     # Solución integral: los modelos nuevos no nacen con cresta. No toca la panza.
     try:
-        from crest_trim_mesh import trim_top_crest
+        from core.crest_trim_mesh import trim_top_crest
         all_pts = trim_top_crest(all_pts)
     except Exception as _e:
         print(f"[warn] recorte de cresta omitido: {_e}")
@@ -803,13 +803,13 @@ def main():
     parser.add_argument('--output', type=str, default=None)
     args = parser.parse_args()
 
-    project = Path(__file__).parent
+    project = Path(__file__).resolve().parents[1]
     modelo3d_dir = Path(args.dataset) if args.dataset else project / "checkpoints" / "modelo3d"
     output_dir = Path(args.output) if args.output else project / "output_modelos3d_batch"
     output_dir.mkdir(exist_ok=True)
 
     # Cargar alturas reales si existen
-    alturas_path = project / "alturas_individuos.json"
+    alturas_path = project / "data" / "alturas_individuos.json"
     alturas = {}
     if alturas_path.exists():
         with open(alturas_path) as f:
@@ -821,7 +821,7 @@ def main():
             print(f"Alturas reales cargadas: {len(alturas)} individuos (clave: {key})")
 
     print("Cargando modelos YOLO...")
-    cow_model = YOLO(str(project / "models_yolo" / "cow.pt"))
+    cow_model = YOLO(str(project / "models" / "cow.pt"))
     coco_model = YOLO(str(project / "yolov8n.pt"))
 
     # Encontrar todas las carpetas de vacas que tienen fotos

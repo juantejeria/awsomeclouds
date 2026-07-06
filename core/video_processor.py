@@ -13,9 +13,9 @@ Dependencias: opencv-python, numpy, weight_estimation, breed_coefficients, testi
 import cv2
 import numpy as np
 from collections import defaultdict
-from weight_estimation import WeightEstimator
-from breed_coefficients import get_weight_multiplier
-from testing import ImageScore
+from core.weight_estimation import WeightEstimator
+from core.breed_coefficients import get_weight_multiplier
+from core.testing import ImageScore
 import os
 import base64
 import math

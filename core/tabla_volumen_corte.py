@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import trimesh
 
-PROJ = Path(__file__).parent
+PROJ = Path(__file__).resolve().parents[1]
 V8 = {
     '6mayo':  'output_modelos3d_live_6mayo_v8',
     '14mayo': 'output_modelos3d_live_14mayo_v8',

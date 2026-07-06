@@ -31,8 +31,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 from ultralytics import YOLO
 from scipy.spatial import Delaunay, ConvexHull
 from pathlib import Path
-from breed_coefficients import get_estimated_height
-from reconstruccion_3d import sfm_real_desde_frames, guardar_ply_con_malla
+from core.breed_coefficients import get_estimated_height
+from core.reconstruccion_3d import sfm_real_desde_frames, guardar_ply_con_malla
 import json
 import statistics
 import matplotlib
@@ -885,7 +885,7 @@ def guardar_ply(path, pts_cm, tris, colores, simetrico=False, escala_info=""):
     # para que los modelos NUEVOS no nazcan con cresta. En el caso plano (z=0 en
     # todo) no hace nada. No toca la panza.
     try:
-        from crest_trim_mesh import trim_top_crest
+        from core.crest_trim_mesh import trim_top_crest
         all_pts = trim_top_crest(all_pts)
     except Exception as _e:
         print(f"[warn] recorte de cresta omitido: {_e}")
@@ -2149,13 +2149,13 @@ def procesar_individuo_sfm_real(individuo_dir, fotos_dir, output_dir, cow_model,
     if triangles is not None and len(triangles) > 0:
         guardar_ply_con_malla(str(ply_3d), points_3d, triangles, colors)
     else:
-        from reconstruccion_3d import guardar_ply as guardar_ply_nube
+        from core.reconstruccion_3d import guardar_ply as guardar_ply_nube
         guardar_ply_nube(str(ply_3d), points_3d, colors)
 
     # Visualizacion PNG
     vis_path = ind_output / f"{nombre}_modelo.png"
     try:
-        from reconstruccion_3d import generar_imagen_resumen
+        from core.reconstruccion_3d import generar_imagen_resumen
         generar_imagen_resumen(sfm_result, str(vis_path), vaca_name=nombre)
     except Exception as e:
         print(f"  WARNING: No se pudo generar imagen resumen: {e}")
@@ -2212,7 +2212,7 @@ def main():
                         help='Clave en alturas_individuos.json (default: alturas_<dataset_name>_cm)')
     args = parser.parse_args()
 
-    project = Path(__file__).parent
+    project = Path(__file__).resolve().parents[1]
     dataset_dir = Path(args.dataset) if args.dataset else project / 'checkpoints' / 'Dataset Modelo 3d "grandes" '
     output_dir = Path(args.output) if args.output else project / "output_modelos3d_grandes"
     output_dir.mkdir(exist_ok=True)
@@ -2222,7 +2222,7 @@ def main():
     _diag_counter[0] = 0
 
     # Cargar alturas reales de cada individuo
-    alturas_path = project / "alturas_individuos.json"
+    alturas_path = project / "data" / "alturas_individuos.json"
     alturas = {}
     if alturas_path.exists():
         with open(alturas_path) as f:
@@ -2241,18 +2241,18 @@ def main():
         print("ADVERTENCIA: No se encontró alturas_individuos.json, usando alturas estimadas")
 
     print("\nCargando modelos YOLO...")
-    cow_model = YOLO(str(project / "models_yolo" / "cow.pt"))
+    cow_model = YOLO(str(project / "models" / "cow.pt"))
     coco_model = YOLO(str(project / "yolov8n.pt"))
     seg_model = YOLO(str(project / "yolov8s-seg.pt"))
 
     silueta_model = None
-    silueta_path = project / "silueta_seg.pt"
+    silueta_path = project / "models" / "silueta_seg.pt"
     if silueta_path.exists():
         silueta_model = YOLO(str(silueta_path))
         print("  silueta_seg.pt cargado (silueta custom)")
 
     barril_model = None
-    barril_path = project / "barril_seg.pt"
+    barril_path = project / "models" / "barril_seg.pt"
     if barril_path.exists():
         barril_model = YOLO(str(barril_path))
         print("  barril_seg.pt cargado (barril custom)")

@@ -21,7 +21,7 @@ import time
 import base64
 
 try:
-    from depth_estimation import DepthEstimator
+    from core.depth_estimation import DepthEstimator
     DEPTH_ESTIMATOR_AVAILABLE = True
 except ImportError:
     DEPTH_ESTIMATOR_AVAILABLE = False
@@ -311,7 +311,7 @@ try:
 except ImportError:
     HF_DEPTH_AVAILABLE = False
 
-from breed_coefficients import get_weight_multiplier
+from core.breed_coefficients import get_weight_multiplier
 
 # HSV del rojo de referencia (rojo tiene dos rangos: 0-10 y 170-180)
 # Rangos más permisivos para detectar rojo puro (bandas rojas de 50cm)
@@ -326,7 +326,7 @@ GRASS_HSV_UPPER = np.array([30, 115, 255])
 class WeightEstimator:
     """Clase para estimar el peso del ganado usando detección de puntos clave"""
     
-    def __init__(self, eye_model_path="models_yolo/eye.pt", cow_model_path="models_yolo/cow.pt",
+    def __init__(self, eye_model_path="models/eye.pt", cow_model_path="models/cow.pt",
                  conf_threshold=0.25, iou_threshold=0.45, eye_conf_multiplier=0.5, keypoint_conf_multiplier=0.5,
                  use_postes_reference=False, poste1_height_cm=100, poste2_height_cm=100,
                  distancia_postes_cm=200, focal_length_px=None, use_monocular_depth=False):

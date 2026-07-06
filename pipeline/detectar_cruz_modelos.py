@@ -24,7 +24,7 @@ import numpy as np
 from pathlib import Path
 from ultralytics import YOLO
 
-PROJ = Path(__file__).parent
+PROJ = Path(__file__).resolve().parents[1]
 OUT = PROJ / 'output_cruz_modelos'
 (OUT / 'grids').mkdir(parents=True, exist_ok=True)
 
@@ -37,8 +37,8 @@ SOURCES = {
 }
 
 print("[init] cargando modelos...")
-cruz_model = YOLO(str(PROJ / 'cruz_pose.pt'))
-barril = YOLO(str(PROJ / 'barril_seg.pt'))
+cruz_model = YOLO(str(PROJ / 'models' / 'cruz_pose.pt'))
+barril = YOLO(str(PROJ / 'models' / 'barril_seg.pt'))
 
 
 def seg_bbox(crop):

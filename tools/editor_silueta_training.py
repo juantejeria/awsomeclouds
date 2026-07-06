@@ -8,11 +8,11 @@ import cv2
 import numpy as np
 import sys
 import os
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from flask import Flask, render_template_string, jsonify, request, send_file
 from pathlib import Path
-from generar_modelos3d_grandes import volumen_por_rebanadas
+from core.generar_modelos3d_grandes import volumen_por_rebanadas
 import json
 import base64
 
@@ -25,7 +25,7 @@ def add_ngrok_header(response):
     return response
 
 
-PROJECT = Path(__file__).parent
+PROJECT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT / 'output_modelos3d_grandes' / '_silueta_training'
 INDEX_FILE = DATA_DIR / 'frames_index.json'
 

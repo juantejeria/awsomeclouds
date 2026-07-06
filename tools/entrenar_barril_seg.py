@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 from sklearn.model_selection import train_test_split
 
-PROJECT = Path(__file__).parent
+PROJECT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT / 'output_modelos3d_grandes' / '_barril_training'
 INDEX_FILE = DATA_DIR / 'frames_index.json'
 DATASET_DIR = PROJECT / 'dataset_barril_seg'
@@ -197,7 +197,7 @@ def entrenar(yaml_path, out_name='barril_seg.pt', run_name='barril_seg'):
 
     # Copiar mejor modelo
     best = PROJECT / 'runs_barril' / run_name / 'weights' / 'best.pt'
-    dst = PROJECT / out_name
+    dst = PROJECT / 'models' / out_name
     if best.exists():
         shutil.copy2(str(best), str(dst))
         print(f"\n{'='*50}")

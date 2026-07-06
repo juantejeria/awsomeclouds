@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np, cv2
 from ultralytics import YOLO
 
-PROJ = Path(__file__).parent
+PROJ = Path(__file__).resolve().parents[1]
 V8 = {'output_modelos3d_live_14mayo_v8': 'output_modelos3d_live_14mayo',
       'output_modelos3d_live_20mayo_v8': 'output_modelos3d_live_20mayo',
       'output_modelos3d_live_6mayo_v8': None,
@@ -17,7 +17,7 @@ V8 = {'output_modelos3d_live_14mayo_v8': 'output_modelos3d_live_14mayo',
 MAXF = 9
 
 print("[init] modelos...")
-coco = YOLO(str(PROJ/'yolov8n.pt')); barril = YOLO(str(PROJ/'barril_seg.pt')); sil = YOLO(str(PROJ/'silueta_seg.pt'))
+coco = YOLO(str(PROJ/'yolov8n.pt')); barril = YOLO(str(PROJ/'models'/'barril_seg.pt')); sil = YOLO(str(PROJ/'models'/'silueta_seg.pt'))
 
 
 def seg(model, crop):

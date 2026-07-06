@@ -109,56 +109,48 @@ El servidor arranca en **http://localhost:5001**.
 
 ```
 cattle-recognition/
+│
+│  ── App web (Flask) ──
 ├── app.py                      # Servidor Flask: endpoints de la API
-├── weight_estimation.py        # Estimación de peso (Schaeffer adaptada)
-├── depth_estimation.py         # Detección de postes y escala cm/px
+├── weight_estimation.py        # Estimación de peso/altura, postes, piso
+├── depth_estimation.py         # Detección de postes rojos y escala cm/px
 ├── video_processor.py          # Procesamiento de video con tracking IoU
-├── testing.py                  # Carga de modelo e inferencia CNN
-├── training.py                 # Entrenamiento de modelos VGGFace
+├── testing.py                  # Inferencia CNN facial (identificación)
 ├── breed_coefficients.py       # Multiplicadores por raza/categoría/edad
-│
-├── config.ini                  # Configuración de la app
-├── run_app.sh                  # Script de arranque
-│
-├── models_yolo/                # Modelos YOLO pre-entrenados
-│   ├── cow.pt                  #   Detección de cuerpo + 9 keypoints
-│   ├── eye.pt                  #   Segmentación de ojos
-│   └── sticker.pt              #   Detección de postes rojos
-│
 ├── keras_vggface/              # Fork local de keras-vggface (TF2)
-│   ├── __init__.py
-│   ├── vggface.py              #   Punto de entrada VGGFace()
-│   ├── models.py               #   Definición de VGG16/ResNet50/SENet50
-│   ├── utils.py                #   Preprocesamiento de imágenes
-│   └── version.py
+├── templates/  static/         # Frontend (index.html, engine.js, viewer3d.js)
+├── config.ini  run_app.sh      # Configuración y arranque
 │
-├── checkpoints/                # Modelos entrenados por granja
-│   └── Productor A/
-│       ├── chckpt.best.h5
-│       └── labels.json
+│  ── Pipeline 3D v8 (21 frames → PLY → volumen → tablas) ──
+├── procesar_21_frames_filtrado.py  # 21 frames → modelo 3D + resumen.json
+├── generar_modelos3d_grandes.py    # Funciones compartidas (volumen, PLY, cresta)
+├── generar_modelos3d_batch.py      # Versión batch usada por app.py
+├── reconstruccion_3d.py            # SfM / mallas
+├── crest_trim_mesh.py              # Recorte de cresta del lomo
+├── gen_v8_todo.py                  # Corre todos los datasets con v8
+├── post_v8.py                      # Post-proceso (barril_dir, anotaciones)
+├── diagnostico_21frames_barril.py  # Diagnóstico visual por individuo
+├── tabla_volumen_corte.py          # Cortes de malla (secciones, clipping)
+├── tabla_corte_barrido.py          # Barrido de cortes 40–70% → CSV
+├── exportar_corte_xlsx.py          # CSV → tabla_corte_barrido_sincresta.xlsx
+├── detectar_cruz_modelos.py        # Cruz por individuo con cruz_pose.pt
 │
-├── dataset/                    # Imágenes de entrenamiento
-│   ├── animal_1/               #   ~10-20 imágenes recortadas de la cara
-│   ├── animal_2/
-│   └── ...
+│  ── Entrenamiento / anotación de modelos YOLO ──
+├── editor_barril.py / editor_barril_training.py / editor_silueta_training.py
+├── entrenar_barril_seg.py / entrenar_silueta_seg.py / entrenar_cruz_pose.py
+├── preparar_silueta_training.py / generar_pred_barril.py
+├── agregar_frames_barril.py / agregar_frames_silueta.py
 │
-├── templates/                  # Templates HTML (Jinja2)
-│   ├── base.html               #   Template base (Bootstrap 4)
-│   ├── chooser.html            #   Selector de granja
-│   └── index.html              #   Interfaz principal
+│  ── Modelos y datos ──
+├── barril_seg.pt  barril_seg_v8.pt  silueta_seg.pt  cruz_pose.pt
+├── alturas_individuos.json     # Alturas reales/calculadas por individuo
+├── *_labels.jsonl              # Anotaciones (corte, cruz_frac, girth, verija)
+├── checkpoints/                # Modelos faciales por granja + sets de 21 frames
+├── models_yolo/                # cow.pt / eye.pt / sticker.pt (no versionados)
 │
-├── static/
-│   ├── css/main.css            # Estilos
-│   ├── js/engine.js            # Lógica del frontend
-│   └── img/                    # Imágenes estáticas
-│
-├── diagnose_model.py           # Diagnóstico de precisión del modelo CNN
-├── diagnose_weight.py          # Diagnóstico de logs de estimación de peso
-├── grad_CAM.py                 # Visualización Grad-CAM
-├── ssim.py                     # Limpieza de duplicados por SSIM
-├── organize_dataset.py         # Organización de imágenes en clases
-├── drawing.py                  # Grafos de arquitectura de red
-└── convfilter_visualization.py # Visualización de filtros convolucionales
+├── docs/                       # Documentación técnica (flujo de volúmenes,
+│                               #   calibración, escala, modelos 3D, resúmenes)
+└── archive/                    # Código y resultados NO activos (ver archive/README.md)
 ```
 
 ## Flujo de Datos
@@ -285,29 +277,24 @@ Ejemplo: Brahman × Ternero × 0-6 meses = `0.93 × 0.84 × 0.85 = 0.664`
 
 ## Entrenamiento de un modelo nuevo
 
-```bash
-# 1. Preparar dataset: imágenes recortadas de la cara en dataset/animal_N/
-# 2. Entrenar (por defecto usa ResNet50, 20 epochs):
-python training.py --granja "Mi Granja" --model resnet50 --epochs 30 --batch_size 16
+**Facial (identificación, legacy):** los scripts de entrenamiento y diagnóstico del
+modelo facial (`training.py`, `diagnose_model.py`, `grad_CAM.py`, `ssim.py`) están en
+`archive/legacy_face/`. Para usarlos, correrlos desde la raíz del proyecto:
 
-# 3. El checkpoint se guarda en checkpoints/Mi Granja/chckpt.best.h5
-#    El mapeo de clases se guarda en checkpoints/Mi Granja/labels.json
+```bash
+python archive/legacy_face/training.py --granja "Mi Granja" --model resnet50 --epochs 30 --batch_size 16
+# El checkpoint se guarda en checkpoints/Mi Granja/chckpt.best.h5
 ```
 
-## Herramientas de Diagnóstico
+**YOLO (barril / silueta / cruz, flujo actual):** la anotación se hace con los
+editores web y el entrenamiento con los scripts `entrenar_*`:
 
 ```bash
-# Verificar precisión del modelo CNN con el dataset
-python diagnose_model.py "Productor A"
-
-# Analizar logs de peso para entender qué puntos faltan
-python diagnose_weight.py app.log
-
-# Visualizar Grad-CAM (qué mira la red)
-python grad_CAM.py --granja "Productor A" --img dataset/animal_1/foto.png --model resnet50
-
-# Limpiar imágenes duplicadas del dataset por similitud SSIM
-python ssim.py --dir dataset/animal_1 --threshold 0.95
+python editor_barril_training.py      # anotar máscaras de barril (puerto 5055)
+python editor_silueta_training.py     # anotar siluetas
+python entrenar_barril_seg.py --out-name barril_seg_v9.pt --run-name barril_seg_v9
+python entrenar_silueta_seg.py
+python entrenar_cruz_pose.py
 ```
 
 ## Troubleshooting
@@ -316,7 +303,7 @@ python ssim.py --dir dataset/animal_1 --threshold 0.95
 
 1. **Verificar que los 3 modelos YOLO existen** en `models_yolo/` (`cow.pt`, `eye.pt`, `sticker.pt`)
 2. **Activar debug** en la UI al procesar video y revisar la consola del servidor
-3. **Ejecutar `diagnose_weight.py`** para analizar los logs
+3. **Ejecutar `archive/analysis/diagnose_weight.py`** para analizar los logs
 4. Causas comunes:
    - No se detectan keypoints → la vaca no está de cuerpo entero en la imagen
    - No se detectan ojos → la vaca no está de perfil (vista lateral)

@@ -1,3 +1,6 @@
+// Vara de referencia (cm) — definida en config.ini [calibracion], inyectada por base.html
+var VARA_CM = (typeof window !== 'undefined' && window.VARA_CM) ? window.VARA_CM : 110;
+var K_DEPTH_CFG = (typeof window !== 'undefined' && window.K_DEPTH) ? window.K_DEPTH : 0.25;
 // ====================================================================
 // engine.js - Manual Frame Selection for Cattle Weight Estimation
 // ====================================================================
@@ -66,13 +69,7 @@ var AppState = {
     passingDetecting: false,
     passingAbort: false,
     passingResults: [],         // [{frameNum, weight_kg, cow_height_cm, annotated_image, p}]
-    passingStats: { analyzed: 0, detected: 0, in_rect: 0, out_rect: 0, no_cow: 0 },
-    // Mapa de pezuñas: línea de mínimos locales (Fase B) y escala derivada (Fase C)
-    feetMapMinimaLine: [],
-    rulerScale: null,           // { cm_per_px, anchor: {x, y}, source: 'feet-floor-cross' | ... }
-    rulerPoints: [],            // [{x, y}] en coords del video original
-    rulerSourceCanvas: null,    // HTMLCanvasElement con el snapshot actual
-    rulerSourceMeta: null       // { w_orig, h_orig, frameNum }
+    passingStats: { analyzed: 0, detected: 0, in_rect: 0, out_rect: 0, no_cow: 0 }
 };
 
 function generateVideoId() {
@@ -180,7 +177,7 @@ function drawReferenceOverlay() {
     ctx.moveTo(R.cx, R.top); ctx.lineTo(R.cx, R.floor);
     ctx.stroke();
 
-    // Cintas rojas (112cm) en cada poste
+    // Cintas rojas (VARA_CM) en cada poste
     ctx.strokeStyle = 'rgba(244, 67, 54, 0.95)';
     ctx.lineWidth = 3;
     [L, R].forEach(function(p) {
@@ -196,7 +193,7 @@ function drawReferenceOverlay() {
     ctx.lineWidth = 3;
     ctx.font = 'bold 14px sans-serif';
     [L, R].forEach(function(p, idx) {
-        var cm = Math.round((p.floor - p.top) / (p.tape_px / 112));
+        var cm = Math.round((p.floor - p.top) / (p.tape_px / VARA_CM));
         var txt = cm + 'cm';
         var xTxt = idx === 0 ? p.cx + 8 : p.cx - 55;
         var yTxt = (p.top + p.floor) / 2;
@@ -237,8 +234,8 @@ function drawReferenceOverlay() {
         var cow_cx_orig = (bb[0] + bb[2]) / 2;
         var posLR = (cow_cx_orig - pL.cx / sx) / (pR.cx / sx - pL.cx / sx);
         // scale por poste en espacio original
-        var s1_orig = 112.0 / (pL.tape_px / sy);
-        var s2_orig = 112.0 / (pR.tape_px / sy);
+        var s1_orig = VARA_CM / (pL.tape_px / sy);
+        var s2_orig = VARA_CM / (pR.tape_px / sy);
         var scale_at_cow = (1 - posLR) * s1_orig + posLR * s2_orig;  // cm/px original
         var bbox_h_orig = bb[3] - bb[1];
         var cow_cm = bbox_h_orig * scale_at_cow;
@@ -329,13 +326,6 @@ function startDetectPassings() {
     AppState.passingAbort = false;
     AppState.passingResults = [];
     AppState.passingStats = { analyzed: 0, detected: 0, in_rect: 0, out_rect: 0, no_cow: 0 };
-    AppState.feetMapMinimaLine = [];
-    AppState.rulerScale = null;
-    AppState.rulerPoints = [];
-    AppState.rulerSourceCanvas = null;
-    AppState.rulerSourceMeta = null;
-    $('#rulerCard').hide();
-    $('#rulerWrap').empty();
 
     $('#btnDetectPassingsLabel').text('Cancelar');
     $('#passingStatusPanel').show().text('Procesando…');
@@ -345,11 +335,6 @@ function startDetectPassings() {
     $('#screeningProgressBar').css('width', '0%');
     $('#screeningProgressText').text('Detectando pasadas…');
     $('#screeningSummary').hide().empty();
-    $('#feetTrajectoryCard').hide();
-    $('#feetTrajectoryWrap').empty();
-    $('#feetTrajectoryInfo').empty();
-    $('#barril3dHeader').hide().empty();
-    $('#barril3dGallery').hide().empty();
     $('#btnCancelScreening').hide();
 
     // Pausar video y desactivar live
@@ -458,7 +443,6 @@ async function processPassingLoop(startFrame, endFrame, interval) {
                     x_cross: data.x_cross,
                     y_cross: data.y_cross,
                     silueta_bottom_used: !!data.silueta_bottom_used,
-                    feet_points: Array.isArray(data.feet_points) ? data.feet_points : [],
                     barril_top_used: !!data.barril_top_used,
                     barril_post_overlap: !!data.barril_post_overlap,
                     barril_volumen_litros: data.barril_volumen_litros,
@@ -578,7 +562,7 @@ async function processPassingLoop(startFrame, endFrame, interval) {
             if (oc) {
                 var floorYavg = ((pL.floor + pR.floor) / 2) * scale;
                 var avgTapePx = (pL.tape_px + pR.tape_px) / 2;
-                var cmPerPxPosts = avgTapePx > 0 ? (112 / avgTapePx) : 0;
+                var cmPerPxPosts = avgTapePx > 0 ? (VARA_CM / avgTapePx) : 0;
                 var distLcm = (data.x_cross - pL.cx) * cmPerPxPosts;
                 var distRcm = (pR.cx - data.x_cross) * cmPerPxPosts;
 
@@ -634,19 +618,6 @@ async function processPassingLoop(startFrame, endFrame, interval) {
             ctx.fillRect(0, 0, Math.min(W, mw + 16), 22);
             ctx.fillStyle = 'rgba(0,0,0,1)';
             ctx.fillText(msg, 8, 15);
-        }
-
-        // Pezuñas detectadas (puntos verdes) — siempre, válido o no
-        if (Array.isArray(data.feet_points) && data.feet_points.length > 0) {
-            ctx.fillStyle = 'rgba(76,175,80,1)';
-            ctx.strokeStyle = 'rgba(0,0,0,0.85)';
-            ctx.lineWidth = 1;
-            data.feet_points.forEach(function(fp) {
-                ctx.beginPath();
-                ctx.arc(fp.x * scale, fp.y * scale, 2.5, 0, Math.PI*2);
-                ctx.fill();
-                ctx.stroke();
-            });
         }
 
         return canvas.toDataURL('image/jpeg', 0.82);
@@ -717,7 +688,7 @@ function appendPassingThumbnail(idx) {
     var r = AppState.passingResults[idx];
     // Galería de ALTURA: solo frames con POSTE SOLAPADO (el bbox de la
     // vaca contiene al poste cercano → el cm/px de ese punto es el del
-    // poste = 112cm contra el mayor tape_px → escala precisa). El
+    // poste = 110cm contra el mayor tape_px → escala precisa). El
     // backend devuelve cow_height_cm únicamente en esos frames.
     if (!r.cow_height_cm) return;
 
@@ -762,305 +733,6 @@ window.showPassingDetail = function(idx) {
         $('html, body').animate({ scrollTop: $('#videoCard').offset().top - 20 }, 300);
     }
 };
-
-// ── Galería de "frames del barril usados para el 3D" ──
-// Disjunta de la galería de altura: acá van solo los frames donde el poste
-// cercano NO solapa con el bbox de la vaca, así que la mask del barril sale
-// limpia (sin la muesca del poste). Esos frames alimentan el consenso
-// multi-frame del 3D.
-
-function renderBarril3DGallery() {
-    var $header = $('#barril3dHeader');
-    var $gal = $('#barril3dGallery');
-    $gal.empty();
-    $header.empty();
-
-    var eligibles = [];
-    AppState.passingResults.forEach(function(r, i) {
-        // 21 frames alrededor del cruce: -10..+10 (incluye el 0).
-        // El frame 0 tiene poste superpuesto pero la malla se repara
-        // automáticamente (ver _reparar_mascara_oclusion en backend).
-        if (!r.barril_eligible) return;
-        var c = r.barril_contour_norm;
-        if (!c || !c.tops_cm || !c.bottoms_cm) return;
-        if (!r.annotated_image || !r.animal_bbox_original || !r.cm_per_px) return;
-        eligibles.push({ r: r, idx: i });
-    });
-
-    if (!eligibles.length) {
-        $header.hide();
-        $gal.hide();
-        return;
-    }
-
-    var nOutliers = eligibles.filter(function(it) { return it.r.barril_outlier; }).length;
-    var nInliers = eligibles.length - nOutliers;
-    var outlierSpan = nOutliers > 0
-        ? ' · <span style="color:#e65100;"><strong>' + nOutliers + ' descartado(s)</strong> por ancho ≥30% bajo la media</span>'
-        : '';
-    $header.html(
-        '<h6 style="margin-bottom:8px;"><i class="fas fa-dharmachakra"></i> ' +
-        'Frames del barril (' + nInliers + ' usados para el modelo 3D)' + outlierSpan + '</h6>' +
-        '<div style="color:#666; font-size:0.85em; margin-bottom:10px;">' +
-        'Frames sin poste solapando. Se descarta cualquier barril cuyo ancho ' +
-        'esté ≥30% por debajo del ancho medio de la pasada (mascara cortada o ' +
-        'cuerpo parcial). Después del descarte se recalcula la media. El ' +
-        'contorno naranja es la silueta usada.</div>'
-    ).show();
-    $gal.css('display', 'flex').show();
-
-    eligibles.forEach(function(item) { appendBarril3DThumbnail(item.idx); });
-}
-
-function appendBarril3DThumbnail(idx) {
-    var r = AppState.passingResults[idx];
-    _buildBarril3DThumbUrl(r).then(function(url) {
-        _injectBarril3DCard(idx, url);
-    });
-}
-
-// Construye (asincrónico) un data URL con el contorno del barril (tops+bottoms
-// ya reparados) dibujado sobre el thumbnail del frame. Reusable por la galería
-// y por la descarga de resultado.
-function _buildBarril3DThumbUrl(r) {
-    return new Promise(function(resolve) {
-        if (!r || !r.annotated_image) { resolve(null); return; }
-        var img = new Image();
-        img.onload = function() {
-            var canvas = document.createElement('canvas');
-            canvas.width = img.width;
-            canvas.height = img.height;
-            var ctx = canvas.getContext('2d');
-            ctx.drawImage(img, 0, 0);
-
-            var c = r.barril_contour_norm;
-            var bb = r.animal_bbox_original;
-            if (!c || !c.tops_cm || !c.bottoms_cm || !bb || !r.cm_per_px) {
-                resolve(canvas.toDataURL('image/jpeg', 0.82));
-                return;
-            }
-            var s = (r.video_w && r.video_w > 0) ? (img.width / r.video_w) : 1;
-            var x1 = bb[0] * s;
-            var x2 = bb[2] * s;
-            var y_floor = bb[3] * s;
-            var px_per_cm = 1 / r.cm_per_px;
-            var px_scale = px_per_cm * s;
-            var N = c.n_samples;
-
-            ctx.beginPath();
-            for (var i = 0; i < N; i++) {
-                var xi = x1 + (x2 - x1) * i / (N - 1);
-                var yi = y_floor - c.tops_cm[i] * px_scale;
-                if (i === 0) ctx.moveTo(xi, yi);
-                else ctx.lineTo(xi, yi);
-            }
-            for (var j = N - 1; j >= 0; j--) {
-                var xj = x1 + (x2 - x1) * j / (N - 1);
-                var yj = y_floor - c.bottoms_cm[j] * px_scale;
-                ctx.lineTo(xj, yj);
-            }
-            ctx.closePath();
-            ctx.fillStyle = 'rgba(255, 152, 0, 0.18)';
-            ctx.fill();
-            ctx.strokeStyle = 'rgba(255, 87, 34, 0.95)';
-            ctx.lineWidth = 2;
-            ctx.stroke();
-
-            resolve(canvas.toDataURL('image/jpeg', 0.82));
-        };
-        img.onerror = function() { resolve(r.annotated_image); };
-        img.src = r.annotated_image;
-    });
-}
-
-function _injectBarril3DCard(idx, thumbUrl) {
-    var r = AppState.passingResults[idx];
-    var c = r.barril_contour_norm;
-    var widthStr = c.width_cm ? c.width_cm.toFixed(1) + ' cm' : 'N/A';
-    var volStr = (r.barril_volumen_litros != null) ? r.barril_volumen_litros.toFixed(1) + ' L' : 'N/A';
-    var rellenoStr = (r.barril_cols_rellenadas != null && r.barril_cols_rellenadas > 0)
-        ? ' · <span style="color:#7b1fa2;">rellenadas: ' + r.barril_cols_rellenadas + '</span>' : '';
-
-    var isOutlier = !!r.barril_outlier;
-    var borderColor = isOutlier ? '#ff9800' : '#ff7043';
-    var devPctStr = (r.barril_width_dev_pct != null) ? r.barril_width_dev_pct.toFixed(1) + '%' : '–';
-    var statusTag = '';
-    if (isOutlier) {
-        var reasonTxt = '';
-        var reasonTitle = '';
-        if (r.barril_outlier_reason === 'width_low') {
-            reasonTxt = 'ancho bajo (' + devPctStr + ')';
-            reasonTitle = 'Ancho del barril ≥30% por debajo de la mediana — máscara cortada por el poste';
-        } else if (r.barril_outlier_reason === 'width_high') {
-            reasonTxt = 'ancho alto (+' + devPctStr + ')';
-            reasonTitle = 'Ancho del barril ≥30% sobre la mediana — postura estirada';
-        } else if (r.barril_outlier_reason === 'oclusion') {
-            reasonTxt = 'oclusión (' + (r.barril_cols_rellenadas || 0) + ' cols)';
-            reasonTitle = 'Más de 15 columnas reparadas por oclusión severa del poste';
-        } else {
-            reasonTxt = 'descartado';
-        }
-        statusTag = '<span style="color:#e65100; font-weight:700;" title="' + reasonTitle + '"> · ⚠ ' + reasonTxt + '</span>';
-    }
-
-    var idxStr = (r.passing_idx != null)
-        ? (r.passing_idx === 0 ? '0 (cruce)' : (r.passing_idx > 0 ? '+' + r.passing_idx : r.passing_idx))
-        : '–';
-    var idxBadge = '<span style="display:inline-block; min-width:32px; padding:1px 6px; ' +
-        'background:' + (r.passing_idx === 0 ? '#1976d2' : '#37474f') + '; color:#fff; ' +
-        'border-radius:10px; font-weight:700; margin-right:6px; font-size:0.85em;">' +
-        idxStr + '</span>';
-
-    var html = '<div class="col-md-6 col-12 mb-2" id="barril3d-card-' + idx + '">' +
-        '<div style="padding:4px; cursor:pointer; border:2px solid ' + borderColor + '; border-radius:6px; background:#fff; overflow:hidden;" ' +
-        'onclick="showPassingDetail(' + idx + ')">' +
-        '<img src="' + thumbUrl + '" style="display:block; width:100%; height:auto; border-radius:4px;">' +
-        '<div style="font-size:0.85em; padding:4px 6px; line-height:1.3;">' +
-        idxBadge +
-        '<strong>Frame ' + r.frameNum + '</strong> · ' +
-        'Vol: <strong>' + volStr + '</strong> · ' +
-        'Ancho: <strong>' + widthStr + '</strong>' + rellenoStr + statusTag +
-        '</div></div></div>';
-    $('#barril3dGallery').append(html);
-}
-
-async function generate3DFromResult() {
-    var cowName = ($('#resultCowName').val() || '').trim();
-    if (!cowName) {
-        alert('Poné un nombre para la vaca.');
-        return;
-    }
-    if (!AppState.passingResults.length) {
-        alert('No hay resultados.');
-        return;
-    }
-
-    // Contornos del barril (galería del barril) sin outliers (ancho ≥30%
-    // por debajo de la media). El modelo 3D se arma exclusivamente desde
-    // la fusión multi-frame de inliers.
-    var contours = [];
-    AppState.passingResults.forEach(function(r) {
-        if (r.cow_height_cm) return;
-        if (r.barril_outlier) return;
-        var c = r.barril_contour_norm;
-        if (!c || !c.heights_cm || !c.width_cm) return;
-        if (c.heights_cm.length !== c.n_samples) return;
-        contours.push({
-            n_samples: c.n_samples,
-            width_cm: c.width_cm,
-            heights_cm: c.heights_cm,
-            tops_cm: c.tops_cm,
-            bottoms_cm: c.bottoms_cm,
-        });
-    });
-    if (contours.length < 2) {
-        alert('Se necesitan al menos 2 frames del barril sin poste solapando y con ancho dentro de tolerancia para generar el modelo 3D. ' +
-              'Hoy hay ' + contours.length + '.');
-        return;
-    }
-
-    // Frame piloto para la malla VISUAL (silueta + textura): tiene que ser
-    // un frame del BARRIL (sin poste solapando, cuerpo limpio), porque si
-    // tomamos un frame de altura el poste rojo aparece en la textura del
-    // modelo 3D. Elegimos el más cercano al ancho del consenso así la malla
-    // refleja al animal promedio. Si no hay consenso, cae al primer válido.
-    var target = null;
-    var bestDiff = Infinity;
-    var refWidth = (AppState.lastConsensusContour && AppState.lastConsensusContour.width_cm) || 0;
-    AppState.passingResults.forEach(function(r) {
-        if (r.cow_height_cm) return;            // skip frames de altura
-        if (!r.barril_contour_norm || !r.barril_contour_norm.width_cm) return;
-        if (!r.cm_per_px) return;
-        if (refWidth > 0) {
-            var diff = Math.abs(r.barril_contour_norm.width_cm - refWidth);
-            if (diff < bestDiff) { bestDiff = diff; target = r; }
-        } else if (!target) {
-            target = r;
-        }
-    });
-    if (!target) {
-        alert('No hay frames del barril (sin poste solapando) para construir la malla visual.');
-        return;
-    }
-
-    var $btn = $('#btnGenerate3D').prop('disabled', true).html('<i class="fas fa-spinner fa-spin"></i> Generando…');
-
-    try {
-        // ── Paso 1: visual 3D desde frame representativo (silueta + colores) ──
-        // Escribe _3d.ply y _lateral.ply con forma de vaca y textura de la foto.
-        // El volumen reportado es el volumen encerrado de la malla _3d.ply.
-        var video = document.getElementById('videoPlayer');
-        await _seekVideo(video, target.frameNum / AppState.fps);
-        var blob = await captureVideoFrameBlob(video);
-
-        var fd = new FormData();
-        fd.append('frame', blob, '3d_frame.jpg');
-        fd.append('cow_name', cowName);
-        fd.append('altura_cm', (AppState.lastAvgH || 0).toFixed(1));
-        // Largo promedio del box del barril (cm), medido en la misma pasada.
-        fd.append('largo_cm', (AppState.lastAvgLargo || 0).toFixed(1));
-        // Dirección de marcha = hacia dónde mira el barril (las manos van al
-        // frente, en el sentido del movimiento). Sirve para ubicar la sección
-        // del diámetro "detrás de las manos".
-        var _dir = _detectMovementDir(AppState.passingResults || []);
-        var barrilDir = _dir.valid ? (_dir.dx > 0 ? 'right' : 'left') : 'unknown';
-        AppState.lastBarrilDir = barrilDir;
-        fd.append('barril_dir', barrilDir);
-        // Pasamos el consenso como barril_L de referencia (lo sobrescribe
-        // igual el paso 2, pero mantiene coherencia si el paso 2 fallara).
-        fd.append('barril_L', (AppState.lastConsensusB || AppState.lastAvgB || 0).toFixed(1));
-        if (AppState.videoId) fd.append('video_id', AppState.videoId);
-        if (AppState.lockedReference) {
-            fd.append('locked_reference_json', JSON.stringify({
-                post1: AppState.lockedReference.post1,
-                post2: AppState.lockedReference.post2,
-                original_coords: AppState.lockedReference.original_coords,
-            }));
-        }
-
-        var respFrame = await fetch('/generate_3d_from_frame', { method: 'POST', body: fd });
-        var dataFrame = await respFrame.json();
-        if (!dataFrame.success) {
-            alert('Error generando visual 3D: ' + (dataFrame.error || 'desconocido'));
-            return;
-        }
-
-        // ── Paso 2: finalizar resumen ──
-        // Reporta vol_barril_litros = volumen encerrado del _3d.ply ya escrito
-        // y guarda metadatos del consenso (frames usados, ancho). NO toca PLYs.
-        var respCons = await fetch('/generate_3d_consensus', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                cow_name: cowName,
-                altura_cm: AppState.lastAvgH || 0,
-                largo_cm: AppState.lastAvgLargo || 0,
-                barril_dir: barrilDir,
-                contours: contours,
-            }),
-        });
-        var dataCons = await respCons.json();
-        if (!dataCons.success) {
-            alert('Error calculando consenso: ' + (dataCons.error || 'desconocido'));
-            return;
-        }
-        if (dataCons.barril_consenso_L != null) {
-            AppState.lastConsensusB = dataCons.barril_consenso_L;
-        }
-
-        if (typeof window.loadModelosDisponibles === 'function') {
-            window.loadModelosDisponibles(dataCons.model_id || cowName);
-        }
-        var $viewer = $('#viewer3dCard');
-        if ($viewer.length) {
-            $('html, body').animate({ scrollTop: $viewer.offset().top - 20 }, 400);
-        }
-    } catch (err) {
-        alert('Error: ' + err);
-    } finally {
-        $btn.prop('disabled', false).html('<i class="fas fa-cube"></i> Generar modelo 3D');
-    }
-}
 
 async function downloadResultCard() {
     var cowName = ($('#resultCowName').val() || '').trim();
@@ -1311,7 +983,7 @@ function _computeBarrilConsensus(contours, mode) {
         widthAgg = _agg(widths.slice(), mode);
     }
 
-    var K_DEPTH = 0.25;
+    var K_DEPTH = K_DEPTH_CFG;
     var dx = widthAgg / (N - 1);
     var volCm3 = 0;
     for (var j = 0; j < N; j++) {
@@ -1482,14 +1154,8 @@ function finalizePassingResults() {
             consensusB = result.volumeL;
             consensusContour = result.contour;
         }
-        var resB = _computeBarrilConsensus(sourceContours, 'p75');
-        var resC = _computeBarrilConsensus(sourceContours, 'maxW_p75');
-        var resE = _computeBarrilConsensus(sourceContours, 'envelope');
         AppState.consensusVariants = {
             A_median: result ? result.volumeL : null,
-            B_p75: resB ? resB.volumeL : null,
-            C_maxW_p75: resC ? resC.volumeL : null,
-            E_envelope: resE ? resE.volumeL : null,
             n_frames: sourceContours.length,
             n_total: entries.length,
             outliers_low: nOutLow,
@@ -1527,7 +1193,6 @@ function finalizePassingResults() {
 
     // PASO 4b: gallery de "frames del barril usados para el 3D".
     // Subconjunto de pasadas con contour válido que alimentan el consenso.
-    renderBarril3DGallery();
 
     var excludedMsg = nExcluded > 0
         ? ' · <span style="color:#e65100;"><strong>' + nExcluded + ' descartados</strong> del promedio</span>'
@@ -1573,7 +1238,6 @@ function finalizePassingResults() {
         '<div class="d-flex align-items-center flex-wrap" style="gap:10px;">' +
         '<input type="text" id="resultCowName" class="config-select" style="min-width:200px;" placeholder="Ej: vaca1">' +
         '<button class="btn btn-analyze" id="btnDownloadResult"><i class="fas fa-download"></i> Descargar resultado</button>' +
-        '<button class="btn btn-analyze" id="btnGenerate3D" style="background:linear-gradient(135deg,#6c5ce7,#a29bfe);"><i class="fas fa-cube"></i> Generar modelo 3D</button>' +
         '</div></div>' : '';
 
     var largoMsg = (avgLargo > 0)
@@ -1600,17 +1264,10 @@ function finalizePassingResults() {
     );
 
     $('#btnDownloadResult').off('click').on('click', downloadResultCard);
-    $('#btnGenerate3D').off('click').on('click', generate3DFromResult);
-
-    renderFeetTrajectoryMap();
 }
 
-// ── Mapa de trayectoria de pezuñas ──
-// Acumula los feet_points detectados en cada frame del barrido y los pinta
-// sobre un canvas único, color-codificados por índice de frame (azul→rojo)
-// para visualizar la trayectoria temporal de los pies.
-// Detecta dirección del movimiento comparando el centro X del bbox del primer
-// frame con el del último frame que tienen bbox válido. > 0 → derecha, < 0 → izquierda.
+// ── Dirección de movimiento (centro X del bbox, primer vs último frame).
+// Usada por el consenso 3D para determinar barril_dir. ──
 function _detectMovementDir(results) {
     var samples = [];
     for (var i = 0; i < results.length; i++) {
@@ -1622,648 +1279,6 @@ function _detectMovementDir(results) {
     if (samples.length < 2) return { dx: 0, valid: false, samples: samples.length };
     var dx = samples[samples.length - 1].cx - samples[0].cx;
     return { dx: dx, valid: Math.abs(dx) > 5, samples: samples.length };
-}
-
-// Devuelve los feet_points filtrados por mitad del bbox según el modo:
-//   'back'  → mitad opuesta al sentido del movimiento (cabeza adelante, cola atrás)
-//   'front' → mitad del lado del movimiento (cabeza)
-//   'all'   → sin filtrar
-// Intersección de dos segmentos AB y CD. Devuelve {x, y} si se cruzan dentro
-// de ambos segmentos, null si no. Coords en el mismo espacio (píxeles del video).
-function _segIntersect(A, B, C, D) {
-    var d1x = B.x - A.x, d1y = B.y - A.y;
-    var d2x = D.x - C.x, d2y = D.y - C.y;
-    var denom = d1x * d2y - d1y * d2x;
-    if (Math.abs(denom) < 1e-9) return null;
-    var t = ((C.x - A.x) * d2y - (C.y - A.y) * d2x) / denom;
-    var u = ((C.x - A.x) * d1y - (C.y - A.y) * d1x) / denom;
-    if (t < 0 || t > 1 || u < 0 || u > 1) return null;
-    return { x: A.x + t * d1x, y: A.y + t * d1y };
-}
-
-function _filterFeetByMode(r, mode, movingRight) {
-    if (mode === 'all') return r.feet_points || [];
-    var bb = r.animal_bbox_original;
-    if (!bb || !Array.isArray(r.feet_points)) return [];
-    var cx = (bb[0] + bb[2]) / 2;
-    return r.feet_points.filter(function(fp) {
-        if (mode === 'back') return movingRight ? (fp.x < cx) : (fp.x > cx);
-        if (mode === 'front') return movingRight ? (fp.x > cx) : (fp.x < cx);
-        return true;
-    });
-}
-
-function renderFeetTrajectoryMap() {
-    var results = AppState.passingResults || [];
-    var mode = $('#feetFilterMode').val() || 'back';
-    var dirInfo = _detectMovementDir(results);
-    var movingRight = dirInfo.dx > 0;
-
-    // Aplicar filtro según modo a una copia (no mutamos passingResults)
-    var filtered = results.map(function(r) {
-        var fp = (mode === 'all' || !dirInfo.valid)
-            ? (r.feet_points || [])
-            : _filterFeetByMode(r, mode, movingRight);
-        return Object.assign({}, r, { _feet_filtered: fp });
-    });
-
-    var withFeet = filtered.filter(function(r) { return r._feet_filtered.length > 0; });
-    var totalFeetAll = withFeet.reduce(function(a, r) { return a + r._feet_filtered.length; }, 0);
-    console.log('[FEET MAP] frames=' + filtered.length + ' frames_with_feet=' + withFeet.length +
-                ' total_points=' + totalFeetAll +
-                ' mode=' + mode + ' dir_dx=' + dirInfo.dx.toFixed(0) +
-                ' dir_valid=' + dirInfo.valid);
-
-    // Frame de referencia: el del cruce si existe, si no el del medio
-    var ref = null;
-    for (var i = 0; i < results.length; i++) {
-        if (results[i].cow_height_cm != null && results[i].annotated_image) {
-            ref = results[i];
-            break;
-        }
-    }
-    if (!ref) {
-        for (var j = 0; j < results.length; j++) {
-            if (results[j].annotated_image) { ref = results[j]; break; }
-        }
-    }
-    if (!ref) {
-        $('#feetTrajectoryInfo').html('<em>No hay frames con vaca detectada en este barrido.</em>');
-        $('#feetTrajectoryWrap').empty();
-        $('#feetTrajectoryCard').show();
-        return;
-    }
-    if (withFeet.length === 0) {
-        $('#feetTrajectoryInfo').html(
-            '<em>Ningún frame devolvió picos de pezuñas.</em> ' +
-            '(silueta_seg no marcó pies o los umbrales de find_peaks son altos — revisar logs Flask)'
-        );
-        $('#feetTrajectoryWrap').empty();
-        $('#feetTrajectoryCard').show();
-        return;
-    }
-
-    // Canvas blanco grande, manteniendo el aspect del video original
-    var srcW = ref.video_w || (results[0] && results[0].video_w);
-    var srcH = ref.video_h || (results[0] && results[0].video_h);
-    if (!srcW || !srcH) { $('#feetTrajectoryCard').hide(); return; }
-    var MAP_W = 1100;
-    var sc = MAP_W / srcW;
-    var MAP_H = Math.round(srcH * sc);
-    var canvas = document.createElement('canvas');
-    canvas.width = MAP_W; canvas.height = MAP_H;
-    var ctx = canvas.getContext('2d');
-    // Fondo blanco
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, MAP_W, MAP_H);
-
-    // Referencia fija: rectángulo de postes + cintas + línea del piso
-    var oc = AppState.lockedReference && AppState.lockedReference.original_coords;
-    if (oc) {
-        var pL = oc.post1.cx < oc.post2.cx ? oc.post1 : oc.post2;
-        var pR = oc.post1.cx < oc.post2.cx ? oc.post2 : oc.post1;
-        // Top + laterales en amarillo apagado
-        ctx.strokeStyle = 'rgba(204,164,0,0.9)';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(pL.cx*sc, pL.top_tape*sc); ctx.lineTo(pR.cx*sc, pR.top_tape*sc);
-        ctx.moveTo(pL.cx*sc, pL.top_tape*sc); ctx.lineTo(pL.cx*sc, pL.floor*sc);
-        ctx.moveTo(pR.cx*sc, pR.top_tape*sc); ctx.lineTo(pR.cx*sc, pR.floor*sc);
-        ctx.stroke();
-        // Línea del piso en azul
-        ctx.strokeStyle = 'rgba(33,150,243,0.95)';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(pL.cx*sc, pL.floor*sc);
-        ctx.lineTo(pR.cx*sc, pR.floor*sc);
-        ctx.stroke();
-        // Cintas rojas inclinadas (la franja de 112cm)
-        ctx.strokeStyle = 'rgba(244,67,54,0.9)';
-        ctx.lineWidth = 1;
-        [pL, pR].forEach(function(p) {
-            var tx = (p.top_tape_x !== undefined ? p.top_tape_x : p.cx) * sc;
-            var ty = p.top_tape * sc;
-            var bx = p.cx * sc;
-            var by = p.floor * sc;
-            ctx.beginPath();
-            ctx.moveTo(tx, ty);
-            ctx.lineTo(bx, by);
-            ctx.stroke();
-        });
-        // Rotated rect en celeste cuando hay tilt
-        [pL, pR].forEach(function(p) {
-            if (!Array.isArray(p.rot_corners) || p.rot_corners.length !== 4) return;
-            if (Math.abs(p.angle_deg || 0) < 0.5) return;
-            ctx.strokeStyle = 'rgba(100,220,255,0.85)';
-            ctx.lineWidth = 1;
-            ctx.beginPath();
-            p.rot_corners.forEach(function(c, i) {
-                var x = c[0] * sc, y = c[1] * sc;
-                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-            });
-            ctx.closePath();
-            ctx.stroke();
-        });
-    }
-
-    // Puntos de pezuñas color-codificados por orden temporal (filtrados según modo)
-    var n = filtered.length;
-    filtered.forEach(function(r, idx) {
-        if (!r._feet_filtered || r._feet_filtered.length === 0) return;
-        var t = n > 1 ? idx / (n - 1) : 0;
-        var rC = Math.round(33 + t * (244 - 33));
-        var gC = Math.round(150 + t * (67 - 150));
-        var bC = Math.round(243 + t * (54 - 243));
-        ctx.fillStyle = 'rgba(' + rC + ',' + gC + ',' + bC + ',0.95)';
-        r._feet_filtered.forEach(function(fp) {
-            ctx.beginPath();
-            ctx.arc(fp.x * sc, fp.y * sc, 1.8, 0, Math.PI*2);
-            ctx.fill();
-        });
-    });
-
-    // ── Línea media (media móvil binned sobre los puntos filtrados) ──
-    // Divide el rango de X en bins, computa la media (x, y) por bin, conecta.
-    // No es recta: sigue la tendencia central del cloud de pezuñas.
-    var allPts = [];
-    filtered.forEach(function(r) {
-        if (r._feet_filtered && r._feet_filtered.length > 0) {
-            r._feet_filtered.forEach(function(fp) {
-                allPts.push({ x: fp.x, y: fp.y });
-            });
-        }
-    });
-    if (allPts.length >= 4) {
-        allPts.sort(function(a, b) { return a.x - b.x; });
-        var minX = allPts[0].x;
-        var maxX = allPts[allPts.length - 1].x;
-        var rangeX = maxX - minX;
-        if (rangeX > 0) {
-            // Cantidad de bins escala con el ancho del rango y la cantidad de puntos
-            var NUM_BINS = Math.max(6, Math.min(24, Math.floor(allPts.length / 2)));
-            var binW = rangeX / NUM_BINS;
-            var bins = [];
-            for (var bi = 0; bi < NUM_BINS; bi++) bins.push({ sx: 0, sy: 0, n: 0 });
-            allPts.forEach(function(p) {
-                var idxB = Math.min(NUM_BINS - 1, Math.floor((p.x - minX) / binW));
-                bins[idxB].sx += p.x;
-                bins[idxB].sy += p.y;
-                bins[idxB].n++;
-            });
-            var line = [];
-            bins.forEach(function(b) {
-                if (b.n > 0) line.push({ x: b.sx / b.n, y: b.sy / b.n });
-            });
-            if (line.length >= 2) {
-                // Curva suave con quadratic curves (control = punto medio)
-                ctx.strokeStyle = 'rgba(33, 33, 33, 0.85)';
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                ctx.moveTo(line[0].x * sc, line[0].y * sc);
-                for (var li = 1; li < line.length - 1; li++) {
-                    var mx = (line[li].x + line[li + 1].x) / 2;
-                    var my = (line[li].y + line[li + 1].y) / 2;
-                    ctx.quadraticCurveTo(line[li].x * sc, line[li].y * sc, mx * sc, my * sc);
-                }
-                ctx.lineTo(line[line.length - 1].x * sc, line[line.length - 1].y * sc);
-                ctx.stroke();
-                // Pequeños puntos en cada media-bin para que se vea de qué pasa la curva
-                ctx.fillStyle = 'rgba(33, 33, 33, 0.6)';
-                line.forEach(function(p) {
-                    ctx.beginPath();
-                    ctx.arc(p.x * sc, p.y * sc, 1.5, 0, Math.PI * 2);
-                    ctx.fill();
-                });
-            }
-
-            // ── Línea de mínimos locales ──
-            // En cada bin nos quedamos con el punto de mayor Y (más cerca del
-            // piso = pezuña plantada). Después filtramos por prominencia para
-            // descartar bins cuyo máximo no es claramente un valle local.
-            var minBins = [];
-            for (var mi = 0; mi < NUM_BINS; mi++) minBins.push(null);
-            allPts.forEach(function(p) {
-                var idxM = Math.min(NUM_BINS - 1, Math.floor((p.x - minX) / binW));
-                if (minBins[idxM] === null || p.y > minBins[idxM].y) {
-                    minBins[idxM] = { x: p.x, y: p.y };
-                }
-            });
-            var minLine = minBins.filter(function(b) { return b !== null; });
-            // Prominencia: descarta puntos cuya Y es menor que el promedio de
-            // sus vecinos menos un umbral relativo al rango Y total.
-            if (minLine.length >= 3) {
-                var ys = minLine.map(function(p) { return p.y; });
-                var yMin = Math.min.apply(null, ys);
-                var yMax = Math.max.apply(null, ys);
-                var prom = Math.max(2, (yMax - yMin) * 0.15);
-                var filteredMin = minLine.filter(function(p, i) {
-                    if (i === 0 || i === minLine.length - 1) return true;
-                    var avgNb = (minLine[i - 1].y + minLine[i + 1].y) / 2;
-                    return p.y >= avgNb - prom;
-                });
-                if (filteredMin.length >= 2) minLine = filteredMin;
-            }
-            if (minLine.length >= 2) {
-                // Línea verde uniendo los mínimos
-                ctx.strokeStyle = 'rgba(46, 125, 50, 0.95)';
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                ctx.moveTo(minLine[0].x * sc, minLine[0].y * sc);
-                for (var ki = 1; ki < minLine.length; ki++) {
-                    ctx.lineTo(minLine[ki].x * sc, minLine[ki].y * sc);
-                }
-                ctx.stroke();
-                // Marcadores en cada mínimo
-                ctx.fillStyle = 'rgba(46, 125, 50, 0.95)';
-                ctx.strokeStyle = 'rgba(255,255,255,0.9)';
-                ctx.lineWidth = 1;
-                minLine.forEach(function(p) {
-                    ctx.beginPath();
-                    ctx.arc(p.x * sc, p.y * sc, 3, 0, Math.PI * 2);
-                    ctx.fill();
-                    ctx.stroke();
-                });
-            }
-            // Exponer para Fase C (escala / regla)
-            AppState.feetMapMinimaLine = minLine.slice();
-
-            // ── Cruce línea-piso × línea-mínimos → escala (Fase C.1) ──
-            // Calcula la primera intersección geométrica entre el segmento del
-            // piso (pL.floor → pR.floor) y la polilínea de mínimos. En ese
-            // punto se evalúa cm_per_px interpolado entre los dos postes
-            // (poste1 = 112cm/tape_px_1, poste2 = 112cm/tape_px_2).
-            // Sin fallback: si no hay cruce, no se deriva escala.
-            if (oc && minLine.length >= 2) {
-                var floorA = { x: pL.cx, y: pL.floor };
-                var floorB = { x: pR.cx, y: pR.floor };
-                var cross = null;
-                for (var si = 0; si < minLine.length - 1; si++) {
-                    var ix = _segIntersect(floorA, floorB, minLine[si], minLine[si + 1]);
-                    if (ix) { cross = ix; break; }
-                }
-                if (cross) {
-                    // t a lo largo del piso (proyección sobre el segmento)
-                    var fx = floorB.x - floorA.x;
-                    var fy = floorB.y - floorA.y;
-                    var fl2 = fx * fx + fy * fy;
-                    var t = fl2 > 0
-                        ? ((cross.x - floorA.x) * fx + (cross.y - floorA.y) * fy) / fl2
-                        : 0;
-                    t = Math.max(0, Math.min(1, t));
-                    var s1 = 112.0 / pL.tape_px;
-                    var s2 = 112.0 / pR.tape_px;
-                    var cmPerPx = (1 - t) * s1 + t * s2;
-                    AppState.rulerScale = {
-                        cm_per_px: cmPerPx,
-                        anchor: { x: cross.x, y: cross.y },
-                        t_floor: t,
-                        source: 'feet-floor-cross'
-                    };
-                    // Dibujar el cruce
-                    ctx.fillStyle = 'rgba(229, 57, 53, 0.95)';
-                    ctx.strokeStyle = 'rgba(255,255,255,0.95)';
-                    ctx.lineWidth = 1.5;
-                    ctx.beginPath();
-                    ctx.arc(cross.x * sc, cross.y * sc, 5, 0, Math.PI * 2);
-                    ctx.fill();
-                    ctx.stroke();
-                    ctx.font = 'bold 12px sans-serif';
-                    ctx.fillStyle = 'rgba(229, 57, 53, 1)';
-                    var lbl = 'escala: ' + cmPerPx.toFixed(4) + ' cm/px';
-                    ctx.fillText(lbl, cross.x * sc + 8, cross.y * sc - 8);
-                } else {
-                    AppState.rulerScale = null;
-                }
-            } else {
-                AppState.rulerScale = null;
-            }
-        }
-    }
-
-    // Flecha de dirección detectada en la esquina superior derecha
-    if (dirInfo.valid) {
-        var arrowY = 22, arrowR = 12, arrowX = MAP_W - 60;
-        ctx.font = 'bold 13px sans-serif';
-        ctx.fillStyle = 'rgba(0,0,0,0.85)';
-        var dlbl = (movingRight ? '→ ' : '← ') + 'dirección';
-        var dlw = ctx.measureText(dlbl).width;
-        ctx.fillText(dlbl, MAP_W - dlw - 12, arrowY);
-    }
-
-    // Leyenda de gradiente
-    var legendW = 200, legendH = 8, lx = 12, ly = MAP_H - 22;
-    var grad = ctx.createLinearGradient(lx, ly, lx + legendW, ly);
-    grad.addColorStop(0, 'rgb(33,150,243)');
-    grad.addColorStop(1, 'rgb(244,67,54)');
-    ctx.fillStyle = grad;
-    ctx.fillRect(lx, ly, legendW, legendH);
-    ctx.strokeStyle = 'rgba(0,0,0,0.4)';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(lx, ly, legendW, legendH);
-    ctx.font = 'bold 11px sans-serif';
-    ctx.fillStyle = 'rgba(0,0,0,0.85)';
-    ctx.fillText('frame inicial', lx, ly - 3);
-    var endLbl = 'frame final';
-    var ew = ctx.measureText(endLbl).width;
-    ctx.fillText(endLbl, lx + legendW - ew, ly - 3);
-
-    var modeLabel = mode === 'back' ? 'Patas traseras'
-                  : mode === 'front' ? 'Patas delanteras'
-                  : 'Todas las patas';
-    var dirLabel = dirInfo.valid
-        ? (movingRight ? 'derecha (→)' : 'izquierda (←)')
-        : '<span style="color:#e65100;">indeterminada (Δcx=' + dirInfo.dx.toFixed(0) + 'px)</span>';
-    var modeWarn = (!dirInfo.valid && mode !== 'all')
-        ? ' <em style="color:#e65100;">— sin dirección clara, mostrando todas</em>'
-        : '';
-    var minLineLbl = (AppState.feetMapMinimaLine && AppState.feetMapMinimaLine.length >= 2)
-        ? ' · <span style="color:#2e7d32;">●</span> línea verde = mínimos locales (pezuñas plantadas)'
-        : '';
-    var scaleLbl = AppState.rulerScale
-        ? ' · <span style="color:#e53935;">●</span> cruce piso × mínimos → escala <strong>' +
-          AppState.rulerScale.cm_per_px.toFixed(4) + ' cm/px</strong>'
-        : (AppState.feetMapMinimaLine && AppState.feetMapMinimaLine.length >= 2
-            ? ' · <em style="color:#e65100;">sin cruce piso × mínimos</em>'
-            : '');
-    $('#feetTrajectoryInfo').html(
-        '<strong>' + modeLabel + '</strong>' + modeWarn + ' · ' +
-        'Dirección: ' + dirLabel + ' · ' +
-        '<strong>' + withFeet.length + '</strong> frames · ' +
-        '<strong>' + totalFeetAll + '</strong> puntos · ' +
-        'color = orden temporal (azul → rojo)' + minLineLbl + scaleLbl
-    );
-    var pngDataUrl = canvas.toDataURL('image/png');
-    // Exponer para que otros flujos (processFolder) puedan persistirlo.
-    AppState.feetMapPngDataUrl = pngDataUrl;
-    AppState.feetMapPayload = {
-        video_w: srcW, video_h: srcH,
-        n_frames: results.length,
-        n_frames_with_feet: withFeet.length,
-        total_feet_points: totalFeetAll,
-        filter_mode: mode,
-        movement_dx: dirInfo.dx,
-        movement_dir: dirInfo.valid ? (movingRight ? 'right' : 'left') : 'unknown',
-        locked_reference: AppState.lockedReference || null,
-        frames: results.map(function(r) {
-            return {
-                frameNum: r.frameNum,
-                passing_idx: (r.passing_idx !== undefined) ? r.passing_idx : null,
-                folder_offset: (r.folder_offset !== undefined) ? r.folder_offset : null,
-                cow_height_cm: r.cow_height_cm || null,
-                within_rectangle: !!r.within_rectangle,
-                animal_bbox_original: r.animal_bbox_original || null,
-                feet_points: r.feet_points || []
-            };
-        })
-    };
-    $('#feetTrajectoryWrap').empty().append(
-        $('<img>').attr('src', pngDataUrl)
-                  .css({ 'max-width': '100%', 'height': 'auto',
-                         'border-radius': '6px', 'border': '1px solid #ccc',
-                         'background': '#fff' })
-    );
-
-    // Nombre base (video + timestamp)
-    var ts = new Date();
-    var pad = function(v) { return (v < 10 ? '0' : '') + v; };
-    var stamp = ts.getFullYear() + pad(ts.getMonth()+1) + pad(ts.getDate()) +
-                '_' + pad(ts.getHours()) + pad(ts.getMinutes()) + pad(ts.getSeconds());
-    var videoBase = (AppState.videoFile && AppState.videoFile.name)
-        ? AppState.videoFile.name.replace(/\.[^.]+$/, '').replace(/[^\w\-]/g, '_')
-        : 'video';
-    var baseName = 'feet_map_' + videoBase + '_' + stamp;
-
-    $('#btnDownloadFeetMap').show().off('click').on('click', function() {
-        var a = document.createElement('a');
-        a.href = pngDataUrl;
-        a.download = baseName + '.png';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-    });
-
-    $('#btnDownloadFeetJson').show().off('click').on('click', function() {
-        var payload = {
-            video: (AppState.videoFile && AppState.videoFile.name) || null,
-            video_w: srcW, video_h: srcH,
-            timestamp: ts.toISOString(),
-            locked_reference: AppState.lockedReference || null,
-            n_frames: results.length,
-            n_frames_with_feet: withFeet.length,
-            total_feet_points: totalFeetAll,
-            frames: results.map(function(r) {
-                return {
-                    frameNum: r.frameNum,
-                    passing_idx: (r.passing_idx !== undefined) ? r.passing_idx : null,
-                    cow_height_cm: r.cow_height_cm || null,
-                    within_rectangle: !!r.within_rectangle,
-                    animal_bbox_original: r.animal_bbox_original || null,
-                    feet_points: r.feet_points || []
-                };
-            })
-        };
-        var blob = new Blob([JSON.stringify(payload, null, 2)], {type: 'application/json'});
-        var url = URL.createObjectURL(blob);
-        var a = document.createElement('a');
-        a.href = url;
-        a.download = baseName + '.json';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
-    });
-
-    $('#feetTrajectoryCard').show();
-    renderRulerCard();
-}
-
-// ── Regla de medición (Fase C.2) ──
-// Usa AppState.rulerScale (cm_per_px en el cruce piso × mínimos) para medir
-// distancias en cualquier frame del video o sobre un thumbnail procesado.
-// Los puntos se guardan en AppState.rulerPoints en coords del video original.
-
-function renderRulerCard() {
-    if (!AppState.rulerScale) {
-        $('#rulerCard').hide();
-        return;
-    }
-    $('#rulerCard').show();
-
-    var mode = $('#rulerSourceMode').val() || 'video';
-    // Poblar el dropdown de thumbnails con todas las pasadas (frameNum + altura si la hay)
-    var $pick = $('#rulerThumbPick');
-    if (mode === 'thumb') {
-        $pick.show();
-        // Repobrar solo si la lista cambió
-        var results = AppState.passingResults || [];
-        var optsKey = results.map(function(r) { return r.frameNum; }).join(',');
-        if ($pick.data('opts-key') !== optsKey) {
-            $pick.empty();
-            results.forEach(function(r, i) {
-                var lbl = 'Frame ' + r.frameNum +
-                    (r.cow_height_cm != null ? ' (' + r.cow_height_cm.toFixed(1) + 'cm)' : '');
-                $pick.append($('<option>').val(i).text(lbl));
-            });
-            $pick.data('opts-key', optsKey);
-        }
-    } else {
-        $pick.hide();
-    }
-
-    var infoBase = 'Escala: <strong>' + AppState.rulerScale.cm_per_px.toFixed(4) +
-        ' cm/px</strong> (ancla en ' +
-        AppState.rulerScale.anchor.x.toFixed(0) + ',' +
-        AppState.rulerScale.anchor.y.toFixed(0) + ')';
-    $('#rulerInfo').html(infoBase + ' · Clickeá dos puntos sobre el frame para medir.');
-
-    // Si todavía no hay snapshot, capturar el frame actual del video automáticamente
-    if (!AppState.rulerSourceCanvas) {
-        if (mode === 'thumb' && AppState.passingResults && AppState.passingResults.length > 0) {
-            rulerLoadThumb(0);
-        } else {
-            rulerCaptureVideoFrame();
-        }
-    } else {
-        rulerDraw();
-    }
-}
-
-// Captura el frame actual del <video> en un canvas y lo carga como fuente.
-function rulerCaptureVideoFrame() {
-    var video = document.getElementById('videoPlayer');
-    if (!video || !video.videoWidth) {
-        alert('No hay video cargado.');
-        return;
-    }
-    var c = document.createElement('canvas');
-    c.width = video.videoWidth;
-    c.height = video.videoHeight;
-    c.getContext('2d').drawImage(video, 0, 0);
-    AppState.rulerSourceCanvas = c;
-    AppState.rulerSourceMeta = { w_orig: c.width, h_orig: c.height,
-                                  frameNum: getCurrentFrameNum() };
-    AppState.rulerPoints = [];
-    rulerDraw();
-}
-
-// Carga un thumbnail procesado (de AppState.passingResults) como fuente.
-function rulerLoadThumb(idx) {
-    var r = AppState.passingResults[idx];
-    if (!r || !r.annotated_image) return;
-    var img = new Image();
-    img.onload = function() {
-        var c = document.createElement('canvas');
-        // Usar dimensiones del video original para mantener escala consistente
-        var wo = r.video_w || img.width;
-        var ho = r.video_h || img.height;
-        c.width = wo;
-        c.height = ho;
-        c.getContext('2d').drawImage(img, 0, 0, wo, ho);
-        AppState.rulerSourceCanvas = c;
-        AppState.rulerSourceMeta = { w_orig: wo, h_orig: ho, frameNum: r.frameNum };
-        AppState.rulerPoints = [];
-        rulerDraw();
-    };
-    img.src = r.annotated_image;
-}
-
-// Dibuja el snapshot + puntos + línea de medición.
-function rulerDraw() {
-    var src = AppState.rulerSourceCanvas;
-    if (!src || !AppState.rulerScale) {
-        $('#rulerWrap').empty();
-        return;
-    }
-    var DISP_W = 900;
-    var sc = DISP_W / src.width;
-    var DISP_H = Math.round(src.height * sc);
-    var canvas = document.createElement('canvas');
-    canvas.width = DISP_W;
-    canvas.height = DISP_H;
-    canvas.style.cursor = 'crosshair';
-    var ctx = canvas.getContext('2d');
-    ctx.drawImage(src, 0, 0, DISP_W, DISP_H);
-
-    // Marcar el ancla de escala
-    var anc = AppState.rulerScale.anchor;
-    ctx.fillStyle = 'rgba(229, 57, 53, 0.95)';
-    ctx.strokeStyle = 'rgba(255,255,255,0.95)';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.arc(anc.x * sc, anc.y * sc, 5, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
-
-    var pts = AppState.rulerPoints || [];
-    // Puntos clickeados
-    pts.forEach(function(p, i) {
-        ctx.fillStyle = i === 0 ? 'rgba(33,150,243,1)' : 'rgba(76,175,80,1)';
-        ctx.strokeStyle = 'rgba(255,255,255,1)';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.arc(p.x * sc, p.y * sc, 6, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
-    });
-
-    // Línea entre puntos + distancia
-    var distLbl = '';
-    if (pts.length === 2) {
-        ctx.strokeStyle = 'rgba(255, 193, 7, 1)';
-        ctx.lineWidth = 2.5;
-        ctx.beginPath();
-        ctx.moveTo(pts[0].x * sc, pts[0].y * sc);
-        ctx.lineTo(pts[1].x * sc, pts[1].y * sc);
-        ctx.stroke();
-        var dx = pts[1].x - pts[0].x;
-        var dy = pts[1].y - pts[0].y;
-        var distPx = Math.sqrt(dx * dx + dy * dy);
-        var distCm = distPx * AppState.rulerScale.cm_per_px;
-        // Label en el punto medio
-        var mx = ((pts[0].x + pts[1].x) / 2) * sc;
-        var my = ((pts[0].y + pts[1].y) / 2) * sc - 8;
-        var txt = distCm.toFixed(1) + ' cm  (' + distPx.toFixed(0) + ' px)';
-        ctx.font = 'bold 14px sans-serif';
-        var tw = ctx.measureText(txt).width;
-        ctx.fillStyle = 'rgba(0,0,0,0.7)';
-        ctx.fillRect(mx - tw / 2 - 6, my - 16, tw + 12, 20);
-        ctx.fillStyle = 'rgba(255,255,255,1)';
-        ctx.fillText(txt, mx - tw / 2, my);
-        distLbl = ' · Distancia: <strong>' + distCm.toFixed(2) + ' cm</strong> (' +
-                  distPx.toFixed(1) + ' px)';
-    } else if (pts.length === 1) {
-        distLbl = ' · 1 punto fijado · click para el segundo.';
-    }
-
-    // Click handler en coords originales del video
-    canvas.addEventListener('click', function(ev) {
-        var rect = canvas.getBoundingClientRect();
-        var cx = (ev.clientX - rect.left) * (canvas.width / rect.width);
-        var cy = (ev.clientY - rect.top) * (canvas.height / rect.height);
-        var ox = cx / sc;
-        var oy = cy / sc;
-        if (AppState.rulerPoints.length >= 2) {
-            AppState.rulerPoints = [{ x: ox, y: oy }];
-        } else {
-            AppState.rulerPoints.push({ x: ox, y: oy });
-        }
-        rulerDraw();
-    });
-
-    $('#rulerWrap').empty().append(canvas);
-
-    var src_meta = AppState.rulerSourceMeta || {};
-    var srcLbl = src_meta.frameNum != null
-        ? 'Frame ' + src_meta.frameNum
-        : 'Snapshot';
-    var infoBase = 'Escala: <strong>' + AppState.rulerScale.cm_per_px.toFixed(4) +
-        ' cm/px</strong> · Fuente: ' + srcLbl;
-    $('#rulerInfo').html(infoBase + distLbl);
-}
-
-function rulerResetPoints() {
-    AppState.rulerPoints = [];
-    rulerDraw();
 }
 
 // ── Análisis en vivo ──
@@ -2329,19 +1344,7 @@ async function renderSavedFolderFrames(folder) {
     if (ctx.fps != null) metaTxt += 'fps=' + ctx.fps + ' · ';
     if (ctx.mode) metaTxt += 'modo=' + ctx.mode + ' · ';
     metaTxt += ctx.locked_reference ? 'con locked_reference ✓' : 'SIN locked_reference';
-    if (data.feet_map_exists) metaTxt += ' · mapa de pezuñas ✓';
     $meta.text(metaTxt);
-
-    var $feetWrap = $('#savedFeetMapWrap');
-    if (data.feet_map_exists) {
-        var url = '/saved_feet_map/' + folder + '?t=' + Date.now();
-        $feetWrap.show().html(
-            '<div style="font-weight:600; font-size:0.85em; margin-bottom:4px;">Trayectoria de pezuñas guardada:</div>' +
-            '<img src="' + url + '" style="max-width:100%; height:auto; border:1px solid #ccc; border-radius:6px; background:#fff;">'
-        );
-    } else {
-        $feetWrap.hide().empty();
-    }
 
     frames.forEach(function(fr) {
         var url = '/saved_frame/' + folder + '/' + fr.file_name;
@@ -2356,193 +1359,6 @@ async function renderSavedFolderFrames(folder) {
             '</div></div>'
         );
     });
-}
-
-async function processFolder() {
-    var folder = prompt('Nombre de la carpeta en checkpoints/6mayo/ (= nombre del video sin extensión):');
-    if (!folder) return;
-    // El nombre del individuo = nombre de la carpeta (= nombre del video).
-    var cowName = folder.replace(/[^A-Za-z0-9_-]/g, '_');
-    if (!cowName) { alert('Nombre de carpeta inválido para usar como individuo.'); return; }
-    var alturaStr = prompt('Altura del animal (cm):', '92.5');
-    if (!alturaStr) return;
-    var altura = parseFloat(alturaStr);
-    if (isNaN(altura) || altura <= 0) { alert('Altura inválida.'); return; }
-
-    var $btn = $('#btnProcessFolder');
-    var $lbl = $('#btnProcessFolderLabel');
-    var orig = $lbl.text();
-    $btn.prop('disabled', true);
-
-    try {
-        // 1. Listar archivos + cargar context.json (locked_reference) de la carpeta
-        var fd0 = new FormData();
-        fd0.append('folder', folder);
-        var resp = await fetch('/list_saved_frames', { method: 'POST', body: fd0 });
-        var data = await resp.json();
-        if (!data.success) { alert('Error: ' + data.error); return; }
-        var frames = data.frames || [];
-        if (!frames.length) { alert('Carpeta vacía.'); return; }
-
-        // Resolver locked_reference: priorizar la del context.json (= la que
-        // estaba activa al guardar los frames). Si no hay, usar la actual.
-        var lockedRef = (data.context && data.context.locked_reference) || AppState.lockedReference;
-        if (!lockedRef) {
-            alert('No hay locked_reference: ni en el context.json de la carpeta ni en la sesión actual. Cargá un video y marcá los postes, o regenerá la carpeta con el botón "Guardar 21 frames" después de marcar postes.');
-            return;
-        }
-        console.log('[processFolder]', frames.length, 'frames; locked_reference desde:', data.context && data.context.locked_reference ? 'context.json' : 'sesión actual');
-
-        // 2. Reset state como si arrancara una nueva pasada
-        AppState.passingResults = [];
-        AppState.passingStats = { analyzed: 0, detected: 0, in_rect: 0, out_rect: 0, no_cow: 0 };
-        $('#screeningGallery').empty();
-        $('#feetTrajectoryCard').hide();
-        $('#feetTrajectoryWrap').empty();
-        $('#feetTrajectoryInfo').empty();
-        $('#barril3dHeader').hide().empty();
-        $('#barril3dGallery').hide().empty();
-
-        // 3. Procesar cada frame con /detect_cow_fast
-        var refJson = JSON.stringify({
-            post1: lockedRef.post1, post2: lockedRef.post2,
-            original_coords: lockedRef.original_coords,
-        });
-        for (var i = 0; i < frames.length; i++) {
-            var fr = frames[i];
-            $lbl.text('Procesando ' + (i + 1) + '/' + frames.length);
-            var imgResp = await fetch('/saved_frame/' + folder + '/' + fr.file_name);
-            var blob = await imgResp.blob();
-            var fd = new FormData();
-            fd.append('frame', blob, fr.file_name);
-            if (AppState.videoId) fd.append('video_id', AppState.videoId);
-            fd.append('locked_reference_json', refJson);
-            var detResp = await fetch('/detect_cow_fast', { method: 'POST', body: fd });
-            var d = await detResp.json();
-            AppState.passingStats.analyzed++;
-            if (d && d.success && d.detected) {
-                AppState.passingStats.detected++;
-                var thumbUrl = await renderProcessedFrameThumb(blob, d, fr.offset);
-                AppState.passingResults.push({
-                    frameNum: fr.frame_num,
-                    valid: !!d.within_rectangle,
-                    within_rectangle: !!d.within_rectangle,
-                    cow_height_cm: d.cow_height_cm,
-                    cm_per_px: d.cm_per_px,
-                    animal_bbox_original: d.animal_bbox_original,
-                    video_w: d.video_w, video_h: d.video_h,
-                    p: d.p, t_floor: d.t_floor,
-                    silueta_bottom_used: !!d.silueta_bottom_used,
-                    barril_top_used: !!d.barril_top_used,
-                    barril_post_overlap: !!d.barril_post_overlap,
-                    barril_volumen_litros: d.barril_volumen_litros,
-                    barril_contour_norm: d.barril_contour_norm,
-                    barril_cols_rellenadas: d.barril_cols_rellenadas,
-                    bbox_aligned_with_floor: !!d.bbox_aligned_with_floor,
-                    annotated_image: thumbUrl,
-                    folder_offset: fr.offset,
-                });
-                // Marcar el frame con offset=0 como "central" (cruce simulado)
-                if (fr.offset === 0 && d.cow_height_cm == null) {
-                    // Si el central no tiene altura, le asignamos la dada por el usuario
-                    AppState.passingResults[AppState.passingResults.length - 1].cow_height_cm = altura;
-                    AppState.passingResults[AppState.passingResults.length - 1].counted_in_avg = true;
-                }
-            } else {
-                AppState.passingStats.no_cow++;
-            }
-        }
-
-        // 4. Finalizar (asigna passing_idx basado en folder_offset)
-        $lbl.text('Calculando consenso...');
-        AppState.passingResults.sort(function(a, b) { return a.frameNum - b.frameNum; });
-        AppState.passingResults.forEach(function(r) {
-            r.passing_idx = (r.folder_offset != null) ? r.folder_offset : null;
-            r.barril_eligible = true;  // todos los 21 son elegibles por construcción
-        });
-
-        // 5. Generar modelo 3D consenso usando el frame central + altura dada
-        var centralR = AppState.passingResults.find(function(r) { return r.folder_offset === 0; });
-        if (!centralR) { alert('No se encontró frame central (offset=0).'); return; }
-
-        // Re-fetch del blob central para mandarlo a /generate_3d_from_frame
-        var centralFile = frames.find(function(f) { return f.offset === 0; });
-        var centralBlob = await (await fetch('/saved_frame/' + folder + '/' + centralFile.file_name)).blob();
-
-        // 6. Computar consenso (4 variantes)
-        // Reusa la lógica de finalizePassingResults para obtener la silueta
-        finalizePassingResults();
-
-        // 7. Generar PLYs desde el frame central
-        $lbl.text('Generando PLYs 3D...');
-        var fd3d = new FormData();
-        fd3d.append('frame', centralBlob, centralFile.file_name);
-        fd3d.append('cow_name', cowName);
-        fd3d.append('altura_cm', String(altura));
-        fd3d.append('barril_L', String(AppState.consensusVariants && AppState.consensusVariants.E_envelope || 0));
-        if (AppState.videoId) fd3d.append('video_id', AppState.videoId);
-        fd3d.append('locked_reference_json', refJson);
-        var resp3d = await fetch('/generate_3d_from_frame', { method: 'POST', body: fd3d });
-        var d3d = await resp3d.json();
-        if (!d3d.success) { alert('Error generando 3D: ' + d3d.error); return; }
-
-        // 8. Guardar el mapa de pezuñas en la carpeta (PNG + JSON)
-        var feetSavedMsg = '';
-        if (AppState.feetMapPngDataUrl) {
-            try {
-                var saveResp = await fetch('/save_feet_map', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        folder: folder,
-                        png_data_url: AppState.feetMapPngDataUrl,
-                        payload: AppState.feetMapPayload || {}
-                    })
-                });
-                var saveData = await saveResp.json();
-                if (saveData.success) {
-                    feetSavedMsg = '\nMapa de pezuñas: feet_map.png guardado';
-                    console.log('[processFolder] feet_map guardado en', saveData.png_path);
-                } else {
-                    console.warn('[processFolder] no se pudo guardar feet_map:', saveData.error);
-                }
-            } catch (e) {
-                console.warn('[processFolder] error guardando feet_map:', e);
-            }
-        }
-
-        var cv = AppState.consensusVariants || {};
-        alert('Modelo 3D generado: ' + cowName + '\n' +
-              'Frames procesados: ' + AppState.passingResults.length + '\n' +
-              'Barril: ' + (cv.A_median || '–').toFixed(1) + ' L\n' +
-              'Carpeta: ' + folder + feetSavedMsg);
-    } catch (e) {
-        console.error('[processFolder] err', e);
-        alert('Error: ' + e.message);
-    } finally {
-        $btn.prop('disabled', false);
-        $lbl.text(orig);
-    }
-}
-
-async function renderProcessedFrameThumb(blob, data, offset) {
-    var img = await createImageBitmap(blob);
-    var THUMB_W = 520;
-    var scale = THUMB_W / img.width;
-    var W = Math.round(img.width * scale);
-    var H = Math.round(img.height * scale);
-    var canvas = document.createElement('canvas');
-    canvas.width = W; canvas.height = H;
-    var ctx = canvas.getContext('2d');
-    ctx.drawImage(img, 0, 0, W, H);
-    // Marca offset arriba a la izquierda
-    ctx.fillStyle = offset === 0 ? '#1976d2' : '#37474f';
-    ctx.fillRect(8, 8, 56, 22);
-    ctx.fillStyle = '#fff';
-    ctx.font = 'bold 14px sans-serif';
-    var lbl = offset === 0 ? '0 cruce' : (offset > 0 ? '+' + offset : String(offset));
-    ctx.fillText(lbl, 12, 24);
-    return canvas.toDataURL('image/jpeg', 0.82);
 }
 
 async function saveFramesAround() {
@@ -2862,13 +1678,6 @@ function initVideoPlayer(file) {
     AppState.screeningResults = [];
     AppState.screeningActive = false;
     // Nuevo video → reset regla de medición + mapa de mínimos
-    AppState.feetMapMinimaLine = [];
-    AppState.rulerScale = null;
-    AppState.rulerPoints = [];
-    AppState.rulerSourceCanvas = null;
-    AppState.rulerSourceMeta = null;
-    $('#rulerCard').hide();
-    $('#rulerWrap').empty();
     // Nuevo video → nuevo video_id, sin referencia fijada
     AppState.videoId = generateVideoId();
     AppState.lockedReference = null;
@@ -3766,11 +2575,6 @@ function startBatchScreening() {
     $('#screeningProgress').show();
     $('#screeningSummary').hide().empty();
     $('#screeningGallery').hide().empty();
-    $('#feetTrajectoryCard').hide();
-    $('#feetTrajectoryWrap').empty();
-    $('#feetTrajectoryInfo').empty();
-    $('#barril3dHeader').hide().empty();
-    $('#barril3dGallery').hide().empty();
     $('#btnCancelScreening').show();
     $('#screeningProgressBar').css('width', '0%');
     $('#screeningProgressText').text('Iniciando screening...');
@@ -4513,38 +3317,7 @@ $(document).ready(function() {
     $('#btnSkipForward').on('click', function() { seekFrame(10); });
     $('#btnLiveAnalyze').on('click', function() { toggleLiveAnalyze(); });
     $('#btnDetectPassings').on('click', function() { toggleDetectPassings(); });
-    $('#feetFilterMode').on('change', function() {
-        if (AppState.passingResults && AppState.passingResults.length > 0) {
-            renderFeetTrajectoryMap();
-        }
-    });
-    $('#rulerSourceMode').on('change', function() {
-        renderRulerCard();
-        var mode = $(this).val();
-        if (mode === 'thumb') {
-            var idx = parseInt($('#rulerThumbPick').val()) || 0;
-            rulerLoadThumb(idx);
-        } else {
-            // Capturar el frame actual del video al cambiar a modo video
-            rulerCaptureVideoFrame();
-        }
-    });
-    $('#rulerThumbPick').on('change', function() {
-        var idx = parseInt($(this).val());
-        if (!isNaN(idx)) rulerLoadThumb(idx);
-    });
-    $('#btnRulerCapture').on('click', function() {
-        var mode = $('#rulerSourceMode').val();
-        if (mode === 'thumb') {
-            var idx = parseInt($('#rulerThumbPick').val()) || 0;
-            rulerLoadThumb(idx);
-        } else {
-            rulerCaptureVideoFrame();
-        }
-    });
-    $('#btnRulerReset').on('click', function() { rulerResetPoints(); });
     $('#btnSave21Frames').on('click', function() { saveFramesAround(); });
-    $('#btnProcessFolder').on('click', function() { processFolder(); });
     $('#btnViewSavedFrames').on('click', function() { showSavedFrames(); });
     $('#savedFramesClose').on('click', function() { $('#savedFramesModal').hide(); });
     $('#savedFramesRefresh').on('click', function() { refreshSavedFolders(); });

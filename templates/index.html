@@ -172,9 +172,7 @@
                         <button class="btn btn-control" id="btnSave21Frames" title="Captura 10 frames antes + el actual + 10 después y los guarda en checkpoints/22abril/" style="margin-left:8px;">
                             <i class="fas fa-save"></i> <span id="btnSave21FramesLabel">Guardar 21 frames</span>
                         </button>
-                        <button class="btn btn-control" id="btnProcessFolder" title="Procesa los 21 frames de una carpeta guardada y genera el modelo 3D consenso del barril" style="margin-left:8px;">
-                            <i class="fas fa-cube"></i> <span id="btnProcessFolderLabel">Procesar carpeta → 3D</span>
-                        </button>
+                        
                         <button class="btn btn-control" id="btnViewSavedFrames" title="Ver carpetas de 21 frames guardadas" style="margin-left:8px;">
                             <i class="fas fa-images"></i> Ver frames guardados
                         </button>
@@ -190,7 +188,7 @@
                                     <button id="savedFramesRefresh" class="btn btn-sm btn-secondary">Refresh</button>
                                 </div>
                                 <div id="savedFramesMeta" style="font-size:0.85em; color:#666; margin-bottom:10px;"></div>
-                                <div id="savedFeetMapWrap" style="display:none; margin-bottom:12px; text-align:center;"></div>
+                                
                                 <div id="savedFramesGrid" style="display:grid; grid-template-columns:repeat(auto-fill, minmax(200px, 1fr)); gap:8px;"></div>
                             </div>
                         </div>
@@ -325,49 +323,7 @@
                 </div>
                 <div id="screeningSummary" style="display:none;"></div>
                 <div id="screeningGallery" class="row" style="display:none;"></div>
-                <div id="feetTrajectoryCard" style="display:none; margin-top:18px; padding-top:12px; border-top:1px solid #e0e0e0;">
-                    <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; margin-bottom:6px;">
-                        <h6 style="margin:0;">Trayectoria de pezuñas (mapa de pies)</h6>
-                        <div>
-                            <select id="feetFilterMode" class="form-select form-select-sm" style="display:inline-block; width:auto; margin-right:6px;">
-                                <option value="back" selected>Solo patas traseras</option>
-                                <option value="front">Solo patas delanteras</option>
-                                <option value="all">Todas las patas</option>
-                            </select>
-                            <button class="btn btn-control btn-sm" id="btnDownloadFeetMap" style="display:none;">
-                                <i class="fas fa-download"></i> Descargar PNG
-                            </button>
-                            <button class="btn btn-control btn-sm" id="btnDownloadFeetJson" style="display:none; margin-left:4px;">
-                                <i class="fas fa-file-code"></i> JSON
-                            </button>
-                        </div>
-                    </div>
-                    <div id="feetTrajectoryInfo" style="font-size:0.85em; color:var(--text-muted); margin-bottom:6px;"></div>
-                    <div id="feetTrajectoryWrap" style="text-align:center;"></div>
-                </div>
-                <div id="rulerCard" style="display:none; margin-top:18px; padding-top:12px; border-top:1px solid #e0e0e0;">
-                    <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; margin-bottom:6px;">
-                        <h6 style="margin:0;">Regla de medición</h6>
-                        <div style="display:flex; align-items:center; flex-wrap:wrap; gap:6px;">
-                            <select id="rulerSourceMode" class="form-select form-select-sm" style="display:inline-block; width:auto;">
-                                <option value="video" selected>Frame actual del video</option>
-                                <option value="thumb">Thumbnail procesado</option>
-                            </select>
-                            <select id="rulerThumbPick" class="form-select form-select-sm" style="display:none; width:auto;"></select>
-                            <button class="btn btn-control btn-sm" id="btnRulerCapture">
-                                <i class="fas fa-camera"></i> Capturar frame
-                            </button>
-                            <button class="btn btn-control btn-sm" id="btnRulerReset">
-                                <i class="fas fa-eraser"></i> Limpiar puntos
-                            </button>
-                        </div>
-                    </div>
-                    <div id="rulerInfo" style="font-size:0.85em; color:var(--text-muted); margin-bottom:6px;"></div>
-                    <div id="rulerWrap" style="text-align:center;"></div>
-                </div>
-                <div id="barril3dHeader" style="display:none; margin-top:18px; padding-top:12px; border-top:1px solid #e0e0e0;"></div>
-                <div id="barril3dGallery" class="row" style="display:none;"></div>
-            </div>
+                            </div>
         </div>
 
         <!-- Modelo 3D desde Video Results Card -->

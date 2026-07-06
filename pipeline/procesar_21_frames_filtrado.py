@@ -29,12 +29,16 @@ _ap.add_argument('--out-tag', default='filtrado',
                  help='Subdirectorio base: output_modelos3d_live_<tag>/')
 _ap.add_argument('--barril-model', default='models/barril_seg.pt',
                  help='.pt del modelo de segmentación de barril (relativo al proyecto o ruta absoluta)')
+_ap.add_argument('--consenso', choices=['envelope', 'mediana'], default='envelope',
+                 help='Fusión de siluetas por columna: envelope (max top / min bottom, '
+                      'infla con máscaras malas) o mediana (robusta a outliers).')
 _args = _ap.parse_args()
 folder = Path(_args.folder)
 altura_cm = _args.altura_cm
 cow_name = _args.cow_name
 min_cov_x = _args.min_cov_x
 out_tag = _args.out_tag
+consenso = _args.consenso
 
 if not folder.is_dir():
     print(f"[error] no existe: {folder}"); sys.exit(1)
@@ -187,21 +191,26 @@ if not contornos:
 print(f"\n[consenso] {len(contornos)} frames procesados")
 
 
-# 3. Consenso ENVELOPE
+# 3. Consenso por columna: ENVELOPE (max/min) o MEDIANA
 tops_env, bots_env, h_env = [], [], []
 for i in range(N):
     ts = [c['tops_cm'][i] for c in contornos if c['tops_cm'][i] > 0]
     bs = [c['bottoms_cm'][i] for c in contornos if c['bottoms_cm'][i] >= 0]
     if not ts or not bs:
         tops_env.append(0.0); bots_env.append(0.0); h_env.append(0.0); continue
-    tops_env.append(max(ts))
-    bots_env.append(min(bs))
+    if consenso == 'mediana':
+        tops_env.append(float(np.median(ts)))
+        bots_env.append(float(np.median(bs)))
+    else:
+        tops_env.append(max(ts))
+        bots_env.append(min(bs))
     h_env.append(tops_env[-1] - bots_env[-1])
 widths = [c['width_cm'] for c in contornos]
-width_env = max(widths)
+width_env = max(widths) if consenso == 'envelope' else float(np.median(widths))
 
 
-print(f"\n  width env:    {width_env:.1f} cm")
+print(f"\n  consenso:     {consenso}")
+print(f"  width:        {width_env:.1f} cm")
 print(f"  alto max:     {max(h_env):.1f} cm")
 
 
@@ -258,14 +267,14 @@ colores = np.array([[139, 90, 43]] * len(all_px), dtype=np.uint8)
 
 ply_lat = out_dir / f'{cow_name}_lateral.ply'
 guardar_ply(str(ply_lat), all_px, tris_arr, colores, simetrico=False,
-            escala_info=f'Consenso E envelope | n={len(contornos)} frames | alto={altura_cm:.1f}cm')
+            escala_info=f'Consenso {consenso} | n={len(contornos)} frames | alto={altura_cm:.1f}cm')
 print(f"[ply] lateral → {ply_lat}")
 
 # 3D: malla cerrada (silueta espejada). Su volumen encerrado es el volumen
 # reportado — única fuente de volumen (sin rebanadas/cilindros).
 ply_3d = out_dir / f'{cow_name}_3d.ply'
 pts_3d, tris_3d = guardar_ply(str(ply_3d), all_px, tris_arr, colores, simetrico=True,
-                              escala_info=f'Consenso E envelope | alto={altura_cm:.1f}cm')
+                              escala_info=f'Consenso {consenso} | alto={altura_cm:.1f}cm')
 vol_barril = volumen_malla_cerrada(pts_3d, tris_3d)
 print(f"[ply] 3d      → {ply_3d}")
 print(f"[volumen] malla cerrada _3d.ply: {vol_barril} L")
@@ -275,7 +284,7 @@ print(f"[volumen] malla cerrada _3d.ply: {vol_barril} L")
 resumen = {
     'individuo': cow_name,
     'altura_real_cm': altura_cm,
-    'metodo': f'envelope_21_frames_filtrado(min_covX={min_cov_x:.0f}%)',
+    'metodo': f'{consenso}_21_frames_filtrado(min_covX={min_cov_x:.0f}%)',
     'frames_usados': len(contornos),
     'min_cov_x_pct': min_cov_x,
     'frames_descartados': len(frame_files) - len(contornos),

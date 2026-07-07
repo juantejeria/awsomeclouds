@@ -73,5 +73,6 @@ samples/
 # ── IDE ──
 .vscode/
 .cursor/
+.claude/
 .idea/
 pyrightconfig.json
